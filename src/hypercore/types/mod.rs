@@ -3417,6 +3417,43 @@ pub struct CandleSnapshotRequest {
     pub end_time: u64,
 }
 
+/// Perp universe row from the `meta` / `metaAndAssetCtxs` info responses.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerpInfoUniverseItem {
+    /// Market symbol (e.g. `BTC`, `xyz:XYZ100`).
+    pub name: String,
+    /// Maximum allowed leverage for the asset.
+    pub max_leverage: u64,
+    /// Size decimal places for order quantities.
+    pub sz_decimals: i64,
+    /// Only isolated margin allowed when true.
+    #[serde(default)]
+    pub only_isolated: bool,
+    /// Margin mode when present.
+    #[serde(default)]
+    pub margin_mode: Option<super::MarginMode>,
+    /// Growth mode (`enabled` / `disabled`) when present.
+    #[serde(default)]
+    pub growth_mode: Option<String>,
+    /// Quote-token alignment flag (wire format may omit).
+    #[serde(default, alias = "isAlignedQuoteToken", alias = "isQuoteTokenAligned")]
+    pub aligned_quote_token: bool,
+}
+
+/// Static perp metadata from `meta` / `metaAndAssetCtxs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerpInfoMeta {
+    /// Ordered perp contracts (index aligns with `assetCtxs` in `metaAndAssetCtxs`).
+    pub universe: Vec<PerpInfoUniverseItem>,
+    /// Collateral token index in spot token table.
+    pub collateral_token: usize,
+}
+
+/// Response tuple from the `metaAndAssetCtxs` POST `/info` request: `[meta, assetCtxs]`.
+pub type MetaAndAssetCtxsResponse = (PerpInfoMeta, Vec<AssetContext>);
+
 // ========================================================
 // PRIVATE TYPES
 // ========================================================
@@ -3429,6 +3466,10 @@ pub struct CandleSnapshotRequest {
 #[serde(tag = "type")]
 pub(super) enum InfoRequest {
     Meta {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dex: Option<String>,
+    },
+    MetaAndAssetCtxs {
         #[serde(skip_serializing_if = "Option::is_none")]
         dex: Option<String>,
     },
@@ -3468,6 +3509,15 @@ pub(super) enum InfoRequest {
     AllMids {
         #[serde(skip_serializing_if = "Option::is_none")]
         dex: Option<String>,
+    },
+    /// L2 order book snapshot (HTTP); at most 20 levels per side per API docs.
+    #[serde(rename = "l2Book")]
+    L2BookInfo {
+        coin: String,
+        #[serde(rename = "nSigFigs", skip_serializing_if = "Option::is_none")]
+        n_sig_figs: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mantissa: Option<u8>,
     },
     CandleSnapshot {
         req: CandleSnapshotRequest,
@@ -3559,6 +3609,68 @@ mod tests {
         }"#;
         let res = serde_json::from_str::<Response>(text);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn meta_and_asset_ctxs_response_tuple_deserializes() {
+        let json = r#"[
+            {
+                "universe":[{"name":"BTC","maxLeverage":40,"szDecimals":5,"onlyIsolated":false}],
+                "collateralToken":0
+            },
+            [{
+                "funding":"0.0001",
+                "openInterest":"1000.0",
+                "premium":"0.00002",
+                "prevDayPx":"50000",
+                "dayNtlVlm":"1000000",
+                "impactPxs":["49999","50001"]
+            }]
+        ]"#;
+        let (meta, ctxs): MetaAndAssetCtxsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.universe.len(), 1);
+        assert_eq!(meta.universe[0].name, "BTC");
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(ctxs[0].funding.to_string(), "0.0001");
+        assert_eq!(ctxs[0].open_interest.to_string(), "1000.0");
+    }
+
+    #[test]
+    fn info_request_meta_and_asset_ctxs_serializes() {
+        let req = InfoRequest::MetaAndAssetCtxs {
+            dex: Some("".to_string()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["type"], "metaAndAssetCtxs");
+    }
+
+    #[test]
+    fn info_request_l2_book_serializes() {
+        let req = InfoRequest::L2BookInfo {
+            coin: "BTC".into(),
+            n_sig_figs: Some(5),
+            mantissa: Some(1),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["type"], "l2Book");
+        assert_eq!(v["coin"], "BTC");
+        assert_eq!(v["nSigFigs"], 5);
+    }
+
+    #[test]
+    fn l2_book_info_response_deserializes_gitbook_shape() {
+        let json = r#"{
+            "coin": "BTC",
+            "time": 1754450974231,
+            "levels": [
+                [{"px":"113377.0","sz":"7.6699","n":17}],
+                [{"px":"113397.0","sz":"0.11543","n":3}]
+            ]
+        }"#;
+        let book: L2Book = serde_json::from_str(json).unwrap();
+        assert_eq!(book.coin, "BTC");
+        assert_eq!(book.bids().len(), 1);
+        assert_eq!(book.asks().len(), 1);
     }
 
     #[test]
@@ -3746,7 +3858,7 @@ mod tests {
                 assert_eq!(candle.open.to_string(), "1850.5");
                 assert_eq!(candle.close.to_string(), "1852.3");
             }
-            _ => assert!(false, "Expected Incoming::Candle"),
+            _ => panic!("Expected Incoming::Candle"),
         }
     }
 
@@ -3773,7 +3885,7 @@ mod tests {
                 assert_eq!(funding.szi.to_string(), "0.5");
                 assert_eq!(funding.funding_rate.to_string(), "0.0001");
             }
-            _ => assert!(false, "Expected Incoming::UserEvents::Funding"),
+            _ => panic!("Expected Incoming::UserEvents::Funding"),
         }
     }
 
@@ -3795,7 +3907,7 @@ mod tests {
                 assert_eq!(non_user_cancel[0].coin, "BTC");
                 assert_eq!(non_user_cancel[0].oid, 77738308);
             }
-            _ => assert!(false, "Expected Incoming::UserEvents::NonUserCancel"),
+            _ => panic!("Expected Incoming::UserEvents::NonUserCancel"),
         }
     }
 
@@ -3811,7 +3923,7 @@ mod tests {
             Incoming::UserEvents(UserEvent::Unknown(raw)) => {
                 assert_eq!(raw["mystery"]["field"], 1);
             }
-            _ => assert!(false, "Expected Incoming::UserEvents::Unknown"),
+            _ => panic!("Expected Incoming::UserEvents::Unknown"),
         }
     }
 
@@ -3843,7 +3955,7 @@ mod tests {
                     Some((Decimal::new(3, 0), Decimal::new(45, 1)))
                 );
             }
-            _ => assert!(false, "Expected Incoming::ActiveAssetData"),
+            _ => panic!("Expected Incoming::ActiveAssetData"),
         }
     }
 
@@ -3891,7 +4003,7 @@ mod tests {
                     FillDirection::OpenLong
                 );
             }
-            _ => assert!(false, "Expected Incoming::UserTwapSliceFills"),
+            _ => panic!("Expected Incoming::UserTwapSliceFills"),
         }
     }
 
@@ -3990,7 +4102,7 @@ mod tests {
                 assert_eq!(item.status.description.as_deref(), Some("completed"));
                 assert!(matches!(item.status.status, TwapStatus::Finished));
             }
-            _ => assert!(false, "Expected Incoming::UserTwapHistory"),
+            _ => panic!("Expected Incoming::UserTwapHistory"),
         }
     }
 
@@ -4033,7 +4145,7 @@ mod tests {
                 assert!(matches!(item.status.status, TwapStatus::Activated));
                 assert_eq!(item.status.description, None);
             }
-            _ => assert!(false, "Expected Incoming::UserTwapHistory"),
+            _ => panic!("Expected Incoming::UserTwapHistory"),
         }
     }
 
@@ -4053,7 +4165,7 @@ mod tests {
                 assert_eq!(payload["clearinghouseState"]["time"], 1710002000000u64);
                 assert_eq!(payload["openOrders"][0]["oid"], 1234u64);
             }
-            _ => assert!(false, "Expected Incoming::WebData2"),
+            _ => panic!("Expected Incoming::WebData2"),
         }
     }
 
@@ -4408,11 +4520,8 @@ mod tests {
                 assert_eq!(fills[0].px.to_string(), "3500.50");
                 assert_eq!(fills[0].sz.to_string(), "0.5");
             }
-            _ => {
-                assert!(
-                    false,
-                    "Expected Incoming::UserEvents(UserEvent::Fills {{ .. }}), got {incoming:?}"
-                )
+            other => {
+                panic!("Expected Incoming::UserEvents(UserEvent::Fills {{ .. }}), got {other:?}")
             }
         }
     }

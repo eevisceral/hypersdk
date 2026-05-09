@@ -86,6 +86,7 @@ use crate::hypercore::{
 /// let client = hypercore::mainnet();
 /// // Use client for API calls
 /// ```
+#[derive(Clone)]
 pub struct Client {
     http_client: reqwest::Client,
     base_url: Url,
@@ -749,6 +750,32 @@ impl Client {
             end_time,
         };
         self.send_info_request("funding_history", &req).await
+    }
+
+    /// Perp metadata plus one [`AssetContext`](super::types::AssetContext) per universe row.
+    ///
+    /// POST `/info` with `type: "metaAndAssetCtxs"`. Response is a JSON array `[meta, assetCtxs]`.
+    pub async fn meta_and_asset_ctxs(
+        &self,
+        dex: Option<String>,
+    ) -> Result<super::types::MetaAndAssetCtxsResponse> {
+        let req = InfoRequest::MetaAndAssetCtxs { dex };
+        self.send_info_request("meta_and_asset_ctxs", &req).await
+    }
+
+    /// L2 order book snapshot (at most **20 levels per side** per API docs).
+    pub async fn l2_book_info(
+        &self,
+        coin: impl Into<String>,
+        n_sig_figs: Option<u8>,
+        mantissa: Option<u8>,
+    ) -> Result<super::types::L2Book> {
+        let req = InfoRequest::L2BookInfo {
+            coin: coin.into(),
+            n_sig_figs,
+            mantissa,
+        };
+        self.send_info_request("l2_book_info", &req).await
     }
 
     /// Retrieves the multi-signature wallet configuration for a user.

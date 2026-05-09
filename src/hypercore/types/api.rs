@@ -1181,7 +1181,7 @@ mod tests {
             assert!(vt.is_deposit);
             assert_eq!(vt.usd, 100_500_000);
         } else {
-            assert!(false, "wrong variant");
+            panic!("wrong variant");
         }
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
                 assert_eq!(inner.nonce, 1_700_000_000_000);
                 assert_eq!(inner.amount, dec!(0.01));
             }
-            _ => assert!(false, "wrong variant"),
+            _ => panic!("wrong variant"),
         }
     }
 
@@ -1242,7 +1242,7 @@ mod tests {
             assert!(ul.is_cross);
             assert_eq!(ul.leverage, 10);
         } else {
-            assert!(false, "wrong variant");
+            panic!("wrong variant");
         }
     }
 
@@ -1262,7 +1262,7 @@ mod tests {
             Action::AgentSetAbstraction { abstraction } => {
                 assert_eq!(abstraction, AbstractionMode::UnifiedAccount);
             }
-            _ => assert!(false, "wrong variant"),
+            _ => panic!("wrong variant"),
         }
 
         // Test all modes
