@@ -131,7 +131,11 @@ impl ListOrdersCmd {
         orders: &[hypersdk::hypercore::types::BasicOrder],
     ) -> anyhow::Result<()> {
         if orders.is_empty() {
-            let filter = self.coin.as_ref().map(|c| format!(" for '{}'", c)).unwrap_or_default();
+            let filter = self
+                .coin
+                .as_ref()
+                .map(|c| format!(" for '{}'", c))
+                .unwrap_or_default();
             println!("No orders found{}.", filter);
             return Ok(());
         }
@@ -142,7 +146,10 @@ impl ListOrdersCmd {
             let ts = chrono::DateTime::from_timestamp_millis(order.timestamp as i64)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| format!("{}ms", order.timestamp));
-            println!("  {} | {:?} | {} {} @ {}", ts, order.order_type, order.side, order.sz, order.limit_px);
+            println!(
+                "  {} | {:?} | {} {} @ {}",
+                ts, order.order_type, order.side, order.sz, order.limit_px
+            );
             println!("    Coin:      {}", order.coin);
             println!("    OID:       {}", order.oid);
             if let Some(ref cloid) = order.cloid {
@@ -160,12 +167,12 @@ impl ListOrdersCmd {
         Ok(())
     }
 
-    fn print_table(
-        &self,
-        orders: &[hypersdk::hypercore::types::BasicOrder],
-    ) -> anyhow::Result<()> {
+    fn print_table(&self, orders: &[hypersdk::hypercore::types::BasicOrder]) -> anyhow::Result<()> {
         let mut writer = tabwriter::TabWriter::new(std::io::stdout());
-        writeln!(writer, "timestamp\tcoin\tside\tlimit_px\tsz\torig_sz\toid\tcloid")?;
+        writeln!(
+            writer,
+            "timestamp\tcoin\tside\tlimit_px\tsz\torig_sz\toid\tcloid"
+        )?;
 
         for order in orders {
             writeln!(
@@ -178,17 +185,18 @@ impl ListOrdersCmd {
                 order.sz,
                 order.orig_sz,
                 order.oid,
-                order.cloid.as_ref().map(|c| c.to_string()).unwrap_or_else(|| "-".to_string())
+                order
+                    .cloid
+                    .as_ref()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".to_string())
             )?;
         }
         writer.flush()?;
         Ok(())
     }
 
-    fn print_json(
-        &self,
-        orders: &[hypersdk::hypercore::types::BasicOrder],
-    ) -> anyhow::Result<()> {
+    fn print_json(&self, orders: &[hypersdk::hypercore::types::BasicOrder]) -> anyhow::Result<()> {
         let output: Vec<OrderOutput> = orders
             .iter()
             .map(|o| OrderOutput {
@@ -266,12 +274,13 @@ impl FillsCmd {
         Ok(())
     }
 
-    fn print_pretty(
-        &self,
-        fills: &[hypersdk::hypercore::types::Fill],
-    ) -> anyhow::Result<()> {
+    fn print_pretty(&self, fills: &[hypersdk::hypercore::types::Fill]) -> anyhow::Result<()> {
         if fills.is_empty() {
-            let filter = self.coin.as_ref().map(|c| format!(" for '{}'", c)).unwrap_or_default();
+            let filter = self
+                .coin
+                .as_ref()
+                .map(|c| format!(" for '{}'", c))
+                .unwrap_or_default();
             println!("No fills found{}.", filter);
             return Ok(());
         }
@@ -283,7 +292,10 @@ impl FillsCmd {
 
         println!(
             "Fills ({} found) | Total notional: {} | Fees: {} | Realized PnL: {}",
-            fills.len(), total_notional, total_fee, total_rpnl
+            fills.len(),
+            total_notional,
+            total_fee,
+            total_rpnl
         );
         println!();
 
@@ -293,9 +305,15 @@ impl FillsCmd {
                 .unwrap_or_else(|| format!("{}ms", fill.time));
             let role = if fill.crossed { "Taker" } else { "Maker" };
 
-            println!("  {} [{}] | {} {} {} @ {} (notional: {})",
-                ts, role,
-                fill.dir, fill.side, fill.sz, fill.px, fill.notional()
+            println!(
+                "  {} [{}] | {} {} {} @ {} (notional: {})",
+                ts,
+                role,
+                fill.dir,
+                fill.side,
+                fill.sz,
+                fill.px,
+                fill.notional()
             );
             println!("    Fee:          {}", fill.fee);
             if fill.closed_pnl != Decimal::ZERO {
@@ -304,19 +322,23 @@ impl FillsCmd {
             if let Some(ref liq) = fill.liquidation {
                 println!("    Liquidation:  {:?}", liq);
             }
-            println!("    OID:          {} | Hash: {}", fill.oid, &fill.hash[..8.min(fill.hash.len())]);
+            println!(
+                "    OID:          {} | Hash: {}",
+                fill.oid,
+                &fill.hash[..8.min(fill.hash.len())]
+            );
             println!();
         }
 
         Ok(())
     }
 
-    fn print_table(
-        &self,
-        fills: &[hypersdk::hypercore::types::Fill],
-    ) -> anyhow::Result<()> {
+    fn print_table(&self, fills: &[hypersdk::hypercore::types::Fill]) -> anyhow::Result<()> {
         let mut writer = tabwriter::TabWriter::new(std::io::stdout());
-        writeln!(writer, "time\tcoin\tside\tsx\tpx\tnotional\tfee\trPnL\tcrossed\toid")?;
+        writeln!(
+            writer,
+            "time\tcoin\tside\tsx\tpx\tnotional\tfee\trPnL\tcrossed\toid"
+        )?;
 
         for fill in fills {
             writeln!(
@@ -338,10 +360,7 @@ impl FillsCmd {
         Ok(())
     }
 
-    fn print_json(
-        &self,
-        fills: &[hypersdk::hypercore::types::Fill],
-    ) -> anyhow::Result<()> {
+    fn print_json(&self, fills: &[hypersdk::hypercore::types::Fill]) -> anyhow::Result<()> {
         let output: Vec<FillOutput> = fills
             .iter()
             .map(|f| FillOutput {

@@ -5,7 +5,10 @@
 
 use alloy::primitives::Address;
 use clap::{Args, Subcommand};
-use hypersdk::{Decimal, hypercore::{self, HttpClient, NonceHandler}};
+use hypersdk::{
+    Decimal,
+    hypercore::{self, HttpClient, NonceHandler},
+};
 
 use crate::SignerArgs;
 use crate::utils::find_signer_sync;
@@ -32,12 +35,18 @@ impl VaultCmd {
 }
 
 async fn execute_transfer(cmd: VaultTransferCmd, is_deposit: bool) -> anyhow::Result<()> {
-    let (verb, past) = if is_deposit { ("Depositing", "Deposited") } else { ("Withdrawing", "Withdrawn") };
+    let (verb, past) = if is_deposit {
+        ("Depositing", "Deposited")
+    } else {
+        ("Withdrawing", "Withdrawn")
+    };
     let signer = find_signer_sync(&cmd.signer)?;
     let client = HttpClient::new(cmd.signer.chain);
     let nonce = NonceHandler::default().next();
     println!("{} ${} vault {}", verb, cmd.amount, cmd.vault);
-    client.vault_transfer(&signer, cmd.vault, cmd.amount, nonce, is_deposit).await?;
+    client
+        .vault_transfer(&signer, cmd.vault, cmd.amount, nonce, is_deposit)
+        .await?;
     println!("{} successfully.", past);
     Ok(())
 }
@@ -81,14 +90,22 @@ impl VaultDetailsCmd {
         println!("Description: {}", details.description);
         println!();
         println!("APR: {}%", details.apr * Decimal::ONE_HUNDRED);
-        println!("Leader Fraction: {}%", details.leader_fraction * Decimal::ONE_HUNDRED);
-        println!("Leader Commission: {}%", details.leader_commission * Decimal::ONE_HUNDRED);
+        println!(
+            "Leader Fraction: {}%",
+            details.leader_fraction * Decimal::ONE_HUNDRED
+        );
+        println!(
+            "Leader Commission: {}%",
+            details.leader_commission * Decimal::ONE_HUNDRED
+        );
         println!("Max Distributable: ${}", details.max_distributable);
         println!("Max Withdrawable: ${}", details.max_withdrawable);
         println!();
         println!("Followers: {}", details.followers.len());
         const DAY_PERIOD: &str = "day";
-        let tvl = details.portfolio.iter()
+        let tvl = details
+            .portfolio
+            .iter()
             .find(|(period, _)| period == DAY_PERIOD)
             .and_then(|(_, p)| p.account_value_history.iter().max_by_key(|(ts, _)| *ts))
             .map(|(_, value)| value.as_str());

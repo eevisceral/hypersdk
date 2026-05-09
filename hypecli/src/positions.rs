@@ -137,10 +137,18 @@ impl PositionsCmd {
 
             println!("  {} — {}", p.coin, side);
             println!("  Size:           {}", p.szi);
-            println!("  Entry Price:    {}", p.entry_px.map(|e| e.to_string()).unwrap_or_else(|| "N/A".to_string()));
+            println!(
+                "  Entry Price:    {}",
+                p.entry_px
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "N/A".to_string())
+            );
             println!("  Mark Value:     {}", p.position_value);
             println!("  Unrealized PnL: {}", p.unrealized_pnl);
-            println!("  Return on Eq:   {}", p.return_on_equity * Decimal::from(100));
+            println!(
+                "  Return on Eq:   {}",
+                p.return_on_equity * Decimal::from(100)
+            );
             println!("  Margin Used:    {}", p.margin_used);
             if let Some(liq_px) = p.liquidation_px {
                 println!("  LiquidationPx:  {}", liq_px);
@@ -158,10 +166,7 @@ impl PositionsCmd {
         }
 
         // Summary
-        let total_pnl: Decimal = positions
-            .iter()
-            .map(|p| &p.position.unrealized_pnl)
-            .sum();
+        let total_pnl: Decimal = positions.iter().map(|p| &p.position.unrealized_pnl).sum();
         let total_value: Decimal = positions.iter().map(|p| &p.position.position_value).sum();
         println!("{}", "=".repeat(45));
         println!("Total unrealized PnL: {}", total_pnl);
@@ -220,7 +225,11 @@ impl PositionsCmd {
                 PositionOutput {
                     coin: p.position.coin.clone(),
                     size: p.position.szi,
-                    side: if p.position.is_long() { "long".to_string() } else { "short".to_string() },
+                    side: if p.position.is_long() {
+                        "long".to_string()
+                    } else {
+                        "short".to_string()
+                    },
                     entry_price: p.position.entry_px,
                     current_value: p.position.position_value,
                     unrealized_pnl: p.position.unrealized_pnl,
