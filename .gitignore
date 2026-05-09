@@ -1,5 +1,7 @@
 target
 .env
 /Cargo.lock
+# Workspace builds use the repo-root lockfile only.
+hypecli/Cargo.lock
 *.json
 docs
