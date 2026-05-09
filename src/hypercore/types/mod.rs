@@ -2676,7 +2676,7 @@ impl FundingRate {
 /// - `mark_px`: Mark price used for liquidations
 /// - `oracle_px`: Oracle price from external feed
 /// - `mid_px`: Mid price between best bid and ask
-/// - `premium`: Premium component of the funding rate
+/// - `premium`: Premium component of the funding rate, absent for inactive/delisted markets
 /// - `prev_day_px`: Previous day's closing price
 /// - `day_ntl_vlm`: 24h notional volume
 ///
@@ -2718,9 +2718,9 @@ pub struct AssetContext {
     /// Mid price between best bid/ask
     #[serde(with = "rust_decimal::serde::str_option", default)]
     pub mid_px: Option<Decimal>,
-    /// Premium component of funding
-    #[serde(with = "rust_decimal::serde::str")]
-    pub premium: Decimal,
+    /// Premium component of funding. Hyperliquid returns `null` for some inactive/delisted markets.
+    #[serde(with = "rust_decimal::serde::str_option", default)]
+    pub premium: Option<Decimal>,
     /// Previous day closing price
     #[serde(with = "rust_decimal::serde::str")]
     pub prev_day_px: Decimal,
@@ -3633,6 +3633,32 @@ mod tests {
         assert_eq!(ctxs.len(), 1);
         assert_eq!(ctxs[0].funding.to_string(), "0.0001");
         assert_eq!(ctxs[0].open_interest.to_string(), "1000.0");
+    }
+
+    #[test]
+    fn meta_and_asset_ctxs_allows_null_optional_ctx_fields() {
+        let json = r#"[
+            {
+                "universe":[{"name":"MATIC","maxLeverage":20,"szDecimals":1,"isDelisted":true}],
+                "collateralToken":0
+            },
+            [{
+                "funding":"0.0",
+                "openInterest":"0.0",
+                "premium":null,
+                "oraclePx":"0.3754",
+                "markPx":"0.37621",
+                "midPx":null,
+                "prevDayPx":"0.37621",
+                "impactPxs":null,
+                "dayNtlVlm":"0.0"
+            }]
+        ]"#;
+        let (_meta, ctxs): MetaAndAssetCtxsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(ctxs.len(), 1);
+        assert!(ctxs[0].premium.is_none());
+        assert!(ctxs[0].mid_px.is_none());
+        assert!(ctxs[0].impact_pxs.is_none());
     }
 
     #[test]
