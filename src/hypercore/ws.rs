@@ -575,13 +575,73 @@ impl futures::Stream for ConnectionStream {
     }
 }
 
+fn ws_ping_interval_secs() -> u64 {
+    std::env::var("HYPERSDK_WS_PING_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&v| (5..=120).contains(&v))
+        .unwrap_or(15)
+}
+
+fn ws_max_missed_pongs() -> u8 {
+    std::env::var("HYPERSDK_WS_MAX_MISSED_PONGS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&v| (2..=12).contains(&v))
+        .unwrap_or(6)
+}
+
+fn ws_connect_timeout_secs() -> u64 {
+    std::env::var("HYPERSDK_WS_CONNECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&v| (5..=120).contains(&v))
+        .unwrap_or(20)
+}
+
+/// Outcome of a heartbeat ping interval tick (before sending the next ping).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPingTick {
+    /// Continue; caller should send a ping and treat the connection as awaiting a pong.
+    Continue { missed_pongs: u8 },
+    /// Too many consecutive missed pongs; caller should reconnect.
+    Reconnect { missed_pongs: u8 },
+}
+
+/// Apply miss counting for a ping interval: only increment when the previous ping
+/// did not receive a pong before this tick.
+fn heartbeat_on_ping_tick(
+    awaiting_pong: bool,
+    missed_pongs: u8,
+    max_missed_pongs: u8,
+) -> HeartbeatPingTick {
+    let mut missed = missed_pongs;
+    if awaiting_pong {
+        missed = missed.saturating_add(1);
+        if missed >= max_missed_pongs {
+            return HeartbeatPingTick::Reconnect {
+                missed_pongs: missed,
+            };
+        }
+    }
+    HeartbeatPingTick::Continue {
+        missed_pongs: missed,
+    }
+}
+
+/// Reset heartbeat state after a successful pong.
+fn heartbeat_on_pong() -> (bool, u8) {
+    (false, 0)
+}
+
 async fn connection(
     url: Url,
     tx: UnboundedSender<Event>,
     mut srx: UnboundedReceiver<SubChannelData>,
     shutdown: CancellationToken,
 ) {
-    const MAX_MISSED_PONGS: u8 = 2;
+    let max_missed_pongs = ws_max_missed_pongs();
+    let connect_timeout = Duration::from_secs(ws_connect_timeout_secs());
     const MAX_RECONNECT_DELAY_MS: u64 = 5_000; // 5 seconds max
     const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 
@@ -591,7 +651,7 @@ async fn connection(
     loop {
         // Race the connect attempt (with timeout) against the shutdown signal.
         let mut stream = match tokio::select! {
-            result = timeout(Duration::from_secs(10), Stream::connect(url.clone())) => {
+            result = timeout(connect_timeout, Stream::connect(url.clone())) => {
                 match result {
                     Ok(Ok(stream)) => Some(stream),
                     Ok(Err(err)) => {
@@ -648,26 +708,34 @@ async fn connection(
             }
         }
 
-        let mut ping_interval = interval(Duration::from_secs(5));
+        let mut ping_interval = interval(Duration::from_secs(ws_ping_interval_secs()));
+        let mut awaiting_pong = false;
         let mut missed_pongs: u8 = 0;
 
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
-                    if missed_pongs >= MAX_MISSED_PONGS {
-                        log::warn!("Missed {missed_pongs} pongs, reconnecting...");
-                        break;
+                    match heartbeat_on_ping_tick(awaiting_pong, missed_pongs, max_missed_pongs) {
+                        HeartbeatPingTick::Reconnect { missed_pongs: missed } => {
+                            log::warn!(
+                                "Missed {missed}/{max_missed_pongs} pongs, reconnecting..."
+                            );
+                            break;
+                        }
+                        HeartbeatPingTick::Continue { missed_pongs: missed } => {
+                            missed_pongs = missed;
+                        }
                     }
 
                     if stream.ping().await.is_ok() {
-                        missed_pongs += 1;
+                        awaiting_pong = true;
                     }
                 }
                 maybe_item = stream.next() => {
                     let Some(item) = maybe_item else { break; };
                     match item {
                         Incoming::Pong => {
-                            missed_pongs = 0;
+                            (awaiting_pong, missed_pongs) = heartbeat_on_pong();
                         }
                         Incoming::Ping => {
                             let _ = stream.pong().await;
@@ -709,4 +777,57 @@ async fn connection(
     }
 
     log::debug!("WebSocket background task shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HeartbeatPingTick, heartbeat_on_ping_tick, heartbeat_on_pong};
+
+    #[test]
+    fn first_ping_tick_does_not_count_miss() {
+        assert_eq!(
+            heartbeat_on_ping_tick(false, 0, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 0 }
+        );
+    }
+
+    #[test]
+    fn ping_tick_counts_miss_only_when_awaiting_pong() {
+        assert_eq!(
+            heartbeat_on_ping_tick(true, 0, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 1 }
+        );
+        assert_eq!(
+            heartbeat_on_ping_tick(true, 4, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 5 }
+        );
+    }
+
+    #[test]
+    fn ping_tick_reconnects_at_max_consecutive_misses() {
+        assert_eq!(
+            heartbeat_on_ping_tick(true, 5, 6),
+            HeartbeatPingTick::Reconnect { missed_pongs: 6 }
+        );
+    }
+
+    #[test]
+    fn pong_resets_heartbeat_state() {
+        assert_eq!(heartbeat_on_pong(), (false, 0));
+    }
+
+    #[test]
+    fn healthy_pong_between_ticks_avoids_false_misses() {
+        let (mut awaiting, mut missed) = (false, 0u8);
+
+        for _ in 0..10 {
+            assert_eq!(
+                heartbeat_on_ping_tick(awaiting, missed, 6),
+                HeartbeatPingTick::Continue { missed_pongs: 0 }
+            );
+            (awaiting, missed) = heartbeat_on_pong();
+        }
+
+        assert_eq!((awaiting, missed), (false, 0));
+    }
 }

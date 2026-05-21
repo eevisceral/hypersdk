@@ -166,6 +166,16 @@ impl Client {
         }
     }
 
+    /// Same as [`Self::new`] with a custom per-request timeout.
+    pub fn with_request_timeout(chain: Chain, timeout: Duration) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(timeout)
+            .tcp_nodelay(true)
+            .build()
+            .expect("reqwest client");
+        Self::new(chain).with_http_client(http_client)
+    }
+
     /// Returns the chain this client is configured for.
     #[must_use]
     pub const fn chain(&self) -> Chain {
