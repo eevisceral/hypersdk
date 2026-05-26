@@ -126,7 +126,7 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    time::{interval, sleep, timeout},
+    time::{MissedTickBehavior, interval, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -136,6 +136,8 @@ use crate::hypercore::types::{Incoming, Outgoing, Subscription};
 
 struct Stream {
     stream: TcpWebSocket,
+    /// WS-level control frames (Ping/Pong) handled inside `poll_next` without yielding.
+    activity_pending: bool,
 }
 
 impl Stream {
@@ -150,7 +152,14 @@ impl Stream {
             )
             .await?;
 
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            activity_pending: false,
+        })
+    }
+
+    fn drain_activity(&mut self) -> bool {
+        std::mem::take(&mut self.activity_pending)
     }
 
     /// Subscribes to a topic.
@@ -188,20 +197,31 @@ impl futures::Stream for Stream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         while let Some(frame) = ready!(this.stream.poll_next_unpin(cx)) {
-            if frame.opcode() == OpCode::Text {
-                match serde_json::from_slice(frame.payload()) {
+            match frame.opcode() {
+                OpCode::Text => match serde_json::from_slice(frame.payload()) {
                     Ok(ok) => {
                         return Poll::Ready(Some(ok));
                     }
                     Err(err) => {
                         log::warn!("unable to parse: {}: {:?}", frame.as_str(), err);
                     }
+                },
+                OpCode::Ping => {
+                    // yawc auto-queues a WS pong in `on_ping`; consume the frame here.
+                    this.activity_pending = true;
                 }
-            } else {
-                log::warn!(
-                    "Hyperliquid sent a binary msg? {data:?}",
-                    data = frame.payload()
-                );
+                OpCode::Pong => {
+                    this.activity_pending = true;
+                }
+                OpCode::Binary => {
+                    log::warn!(
+                        "Hyperliquid sent a binary msg? {data:?}",
+                        data = frame.payload()
+                    );
+                }
+                opcode => {
+                    log::debug!("ignored WebSocket frame: {opcode:?}");
+                }
             }
         }
 
@@ -629,8 +649,8 @@ fn heartbeat_on_ping_tick(
     }
 }
 
-/// Reset heartbeat state after a successful pong.
-fn heartbeat_on_pong() -> (bool, u8) {
+/// Reset heartbeat state after connection activity (pong or any application message).
+fn heartbeat_on_activity() -> (bool, u8) {
     (false, 0)
 }
 
@@ -709,12 +729,18 @@ async fn connection(
         }
 
         let mut ping_interval = interval(Duration::from_secs(ws_ping_interval_secs()));
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Skip the immediate first tick so the first heartbeat fires one full interval after connect.
+        ping_interval.tick().await;
         let mut awaiting_pong = false;
         let mut missed_pongs: u8 = 0;
 
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
+                    if stream.drain_activity() {
+                        (awaiting_pong, missed_pongs) = heartbeat_on_activity();
+                    }
                     match heartbeat_on_ping_tick(awaiting_pong, missed_pongs, max_missed_pongs) {
                         HeartbeatPingTick::Reconnect { missed_pongs: missed } => {
                             log::warn!(
@@ -734,13 +760,15 @@ async fn connection(
                 maybe_item = stream.next() => {
                     let Some(item) = maybe_item else { break; };
                     match item {
-                        Incoming::Pong => {
-                            (awaiting_pong, missed_pongs) = heartbeat_on_pong();
-                        }
                         Incoming::Ping => {
                             let _ = stream.pong().await;
+                            (awaiting_pong, missed_pongs) = heartbeat_on_activity();
                         }
-                        _ => {
+                        Incoming::Pong => {
+                            (awaiting_pong, missed_pongs) = heartbeat_on_activity();
+                        }
+                        item => {
+                            (awaiting_pong, missed_pongs) = heartbeat_on_activity();
                             let _ = tx.send(Event::Message(item));
                         }
                     }
@@ -781,7 +809,8 @@ async fn connection(
 
 #[cfg(test)]
 mod tests {
-    use super::{HeartbeatPingTick, heartbeat_on_ping_tick, heartbeat_on_pong};
+    use super::{HeartbeatPingTick, heartbeat_on_activity, heartbeat_on_ping_tick};
+    use tokio::time::{Duration, MissedTickBehavior, interval};
 
     #[test]
     fn first_ping_tick_does_not_count_miss() {
@@ -812,8 +841,8 @@ mod tests {
     }
 
     #[test]
-    fn pong_resets_heartbeat_state() {
-        assert_eq!(heartbeat_on_pong(), (false, 0));
+    fn activity_resets_heartbeat_state() {
+        assert_eq!(heartbeat_on_activity(), (false, 0));
     }
 
     #[test]
@@ -825,9 +854,54 @@ mod tests {
                 heartbeat_on_ping_tick(awaiting, missed, 6),
                 HeartbeatPingTick::Continue { missed_pongs: 0 }
             );
-            (awaiting, missed) = heartbeat_on_pong();
+            (awaiting, missed) = heartbeat_on_activity();
         }
 
         assert_eq!((awaiting, missed), (false, 0));
+    }
+
+    #[test]
+    fn activity_reset_prevents_false_miss_accumulation() {
+        assert_eq!(
+            heartbeat_on_ping_tick(true, 4, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 5 }
+        );
+
+        // Market/application traffic proves liveness and clears pending miss state.
+        let (awaiting, missed) = heartbeat_on_activity();
+        assert_eq!(
+            heartbeat_on_ping_tick(awaiting, missed, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 0 }
+        );
+    }
+
+    #[test]
+    fn misses_accumulate_without_activity_between_ticks() {
+        assert_eq!(
+            heartbeat_on_ping_tick(true, 0, 6),
+            HeartbeatPingTick::Continue { missed_pongs: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_interval_delay_coalesces_missed_ticks() {
+        // MissedTickBehavior::Delay prevents burst catch-up ticks after the select loop
+        // spends time processing stream messages (the root cause of false reconnects).
+        let mut ping_interval = interval(Duration::from_millis(10));
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ping_interval.tick().await;
+
+        tokio::time::sleep(Duration::from_millis(35)).await;
+
+        let first = tokio::time::timeout(Duration::from_millis(5), ping_interval.tick()).await;
+        assert!(
+            first.is_ok(),
+            "one coalesced tick should be ready after delay"
+        );
+        let second = tokio::time::timeout(Duration::from_millis(5), ping_interval.tick()).await;
+        assert!(
+            second.is_err(),
+            "Delay behavior should not deliver burst catch-up ticks"
+        );
     }
 }
