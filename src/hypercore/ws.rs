@@ -123,7 +123,7 @@ use std::{
 };
 
 use anyhow::Result;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt as _, SinkExt, StreamExt};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     time::{MissedTickBehavior, interval, sleep, timeout},
@@ -654,6 +654,35 @@ fn heartbeat_on_activity() -> (bool, u8) {
     (false, 0)
 }
 
+/// Process any inbound frames already buffered without waiting on the socket.
+///
+/// Prevents false heartbeat misses when the select loop was busy on ping ticks or
+/// subscription I/O while pongs or market traffic were queued.
+async fn drain_ready_inbound(stream: &mut Stream, tx: &UnboundedSender<Event>) -> bool {
+    let mut activity = false;
+    loop {
+        match stream.next().now_or_never() {
+            Some(Some(item)) => {
+                activity = true;
+                match item {
+                    Incoming::Ping => {
+                        let _ = stream.pong().await;
+                    }
+                    Incoming::Pong => {}
+                    item => {
+                        let _ = tx.send(Event::Message(item));
+                    }
+                }
+            }
+            Some(None) | None => break,
+        }
+    }
+    if stream.drain_activity() {
+        activity = true;
+    }
+    activity
+}
+
 async fn connection(
     url: Url,
     tx: UnboundedSender<Event>,
@@ -738,7 +767,7 @@ async fn connection(
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
-                    if stream.drain_activity() {
+                    if drain_ready_inbound(&mut stream, &tx).await {
                         (awaiting_pong, missed_pongs) = heartbeat_on_activity();
                     }
                     match heartbeat_on_ping_tick(awaiting_pong, missed_pongs, max_missed_pongs) {
@@ -790,6 +819,9 @@ async fn connection(
                             log::error!("Unsubscribing: {err:?}");
                             break;
                         }
+                    }
+                    if drain_ready_inbound(&mut stream, &tx).await {
+                        (awaiting_pong, missed_pongs) = heartbeat_on_activity();
                     }
                 }
                 _ = shutdown.cancelled() => {
