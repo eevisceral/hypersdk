@@ -47,6 +47,7 @@
 //!
 //! Convert between decimal amounts and wei using `to_wei(amount, decimals)` and `from_wei(wei, decimals)`.
 
+pub mod logs;
 pub mod morpho;
 pub mod uniswap;
 
@@ -63,6 +64,9 @@ pub use alloy::{
     sol,
 };
 use rust_decimal::Decimal;
+
+/// HyperEVM mainnet chain ID.
+pub const CHAIN_ID: u64 = 999;
 
 /// Default HyperEVM RPC URL.
 ///

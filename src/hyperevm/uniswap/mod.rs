@@ -69,6 +69,7 @@
 
 pub mod contracts;
 pub mod prjx;
+pub mod swap;
 
 use std::{
     collections::{HashMap, hash_map::Entry},

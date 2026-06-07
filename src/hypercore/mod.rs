@@ -88,9 +88,12 @@
 pub mod error;
 pub mod http;
 pub mod signing;
+pub mod spot_evm_map;
 pub mod types;
 mod utils;
 pub mod ws;
+
+pub use spot_evm_map::SpotEvmMap;
 
 use std::{
     hash::Hash,
