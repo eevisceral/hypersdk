@@ -1901,7 +1901,7 @@ impl Client {
 
     /// Query the current account abstraction mode for a user.
     ///
-    /// Sends an info request to `/info` with type `"abstraction"`.
+    /// Sends an info request to `/info` with type `"userAbstraction"`.
     /// Returns the current mode as parsed by [`AbstractionMode`].
     ///
     /// # Example

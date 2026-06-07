@@ -804,6 +804,36 @@ impl PriceTick {
     }
 }
 
+/// One row in a Hyperliquid `marginTables` tier list (notional lower bound → max leverage).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MarginTier {
+    /// Minimum position notional (USD) for this tier to apply.
+    pub lower_bound_usd: f64,
+    /// Max leverage allowed at or above this notional bound.
+    pub max_leverage: u64,
+}
+
+/// Resolve tiered max leverage from `marginTables` (falls back to headline max when empty).
+#[must_use]
+pub fn effective_max_leverage_for_tiers(
+    tiers: &[MarginTier],
+    headline_max: u64,
+    notional_usd: f64,
+) -> u64 {
+    if tiers.is_empty() || !notional_usd.is_finite() || notional_usd <= 0.0 {
+        return headline_max.max(1);
+    }
+    let mut effective = 1u64;
+    for tier in tiers {
+        if notional_usd + f64::EPSILON >= tier.lower_bound_usd {
+            effective = tier.max_leverage.max(1);
+        } else {
+            break;
+        }
+    }
+    effective.min(headline_max.max(1)).max(1)
+}
+
 /// Perpetual futures contract market.
 ///
 /// Represents a perpetual (non-expiring) futures contract on Hyperliquid.
@@ -845,6 +875,10 @@ pub struct PerpMarket {
     pub growth_mode: bool,
     /// Whether the quote token is aligned for this market
     pub aligned_quote_token: bool,
+    /// `meta` margin table id for this asset.
+    pub margin_table_id: u64,
+    /// Resolved margin tiers (empty when table missing).
+    pub margin_tiers: Vec<MarginTier>,
     /// Price tick configuration for valid price increments
     pub table: PriceTick,
 }
@@ -862,6 +896,12 @@ impl PerpMarket {
     #[must_use]
     pub fn symbol(&self) -> &str {
         &self.name
+    }
+
+    /// Effective max leverage for a target notional, accounting for margin tier tables.
+    #[must_use]
+    pub fn effective_max_leverage(&self, notional_usd: f64) -> u64 {
+        effective_max_leverage_for_tiers(&self.margin_tiers, self.max_leverage, notional_usd)
     }
 
     /// Returns the price tick configuration for this market.
@@ -1645,6 +1685,7 @@ pub async fn perp_markets(
         .context("collateral token index out of bounds")?;
     let collateral = SpotToken::from(collateral.clone());
     let dex_index = dex.as_ref().map(|dex| dex.index).unwrap_or_default();
+    let margin_tables = parse_margin_tables(&data.margin_tables);
 
     let perps = data
         .universe
@@ -1653,6 +1694,10 @@ pub async fn perp_markets(
         .map(|(index, perp)| {
             // https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids
             let index = 100_000 * usize::from(dex.is_some()) + dex_index * 10_000 + index;
+            let margin_tiers = margin_tables
+                .get(&perp.margin_table_id)
+                .cloned()
+                .unwrap_or_default();
             PerpMarket {
                 name: perp.name,
                 index,
@@ -1663,6 +1708,8 @@ pub async fn perp_markets(
                 margin_mode: perp.margin_mode,
                 growth_mode: perp.growth_mode,
                 aligned_quote_token: perp.aligned_quote_token,
+                margin_table_id: perp.margin_table_id,
+                margin_tiers,
                 table: PriceTick::for_perp(perp.sz_decimals),
             }
         })
@@ -1799,6 +1846,52 @@ fn generate_evm_transfer_address(index: usize) -> Address {
 struct PerpTokens {
     universe: Vec<PerpUniverseItem>,
     collateral_token: usize,
+    #[serde(default)]
+    margin_tables: Vec<RawMarginTableEntry>,
+}
+
+#[derive(Deserialize)]
+struct RawMarginTableEntry(u64, RawMarginTableBody);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMarginTableBody {
+    #[serde(default)]
+    margin_tiers: Vec<RawMarginTier>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMarginTier {
+    lower_bound: String,
+    max_leverage: u64,
+}
+
+fn parse_margin_tables(
+    raw: &[RawMarginTableEntry],
+) -> std::collections::HashMap<u64, Vec<MarginTier>> {
+    let mut out = std::collections::HashMap::new();
+    for RawMarginTableEntry(id, body) in raw {
+        let tiers = body
+            .margin_tiers
+            .iter()
+            .filter_map(|t| {
+                let lower = t.lower_bound.parse::<f64>().ok()?;
+                if lower.is_finite() && lower >= 0.0 {
+                    Some(MarginTier {
+                        lower_bound_usd: lower,
+                        max_leverage: t.max_leverage.max(1),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !tiers.is_empty() {
+            out.insert(*id, tiers);
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -1814,7 +1907,8 @@ struct PerpUniverseItem {
     growth_mode: bool,
     #[serde(default, alias = "isAlignedQuoteToken", alias = "isQuoteTokenAligned")]
     aligned_quote_token: bool,
-    // margin_table_id: u64,
+    #[serde(default)]
+    margin_table_id: u64,
 }
 
 fn deserialize_growth_mode<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -1928,6 +2022,25 @@ mod tests {
 
     use super::*;
     use crate::hypercore;
+
+    #[test]
+    fn effective_max_leverage_respects_margin_tiers() {
+        let tiers = vec![
+            MarginTier {
+                lower_bound_usd: 0.0,
+                max_leverage: 40,
+            },
+            MarginTier {
+                lower_bound_usd: 150_000_000.0,
+                max_leverage: 20,
+            },
+        ];
+        assert_eq!(effective_max_leverage_for_tiers(&tiers, 40, 1_000.0), 40);
+        assert_eq!(
+            effective_max_leverage_for_tiers(&tiers, 40, 150_000_000.0),
+            20
+        );
+    }
 
     #[tokio::test]
     async fn test_spot_markets() {

@@ -3560,7 +3560,8 @@ pub(super) enum InfoRequest {
     OutcomeMeta,
     /// Query gossip priority auction status.
     GossipPriorityAuctionStatus,
-    /// Query account abstraction mode for a user.
+    /// Query account abstraction mode for a user (`userAbstraction` info type).
+    #[serde(rename = "userAbstraction")]
     AbstractionMode {
         user: Address,
     },
@@ -3672,6 +3673,17 @@ mod tests {
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "metaAndAssetCtxs");
+    }
+
+    #[test]
+    fn info_request_user_abstraction_serializes() {
+        let user: Address = "0xcaf9a98c389665338779caec50b32926af053a36"
+            .parse()
+            .unwrap();
+        let req = InfoRequest::AbstractionMode { user };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["type"], "userAbstraction");
+        assert_eq!(v["user"], "0xcaf9a98c389665338779caec50b32926af053a36");
     }
 
     #[test]
