@@ -1502,7 +1502,15 @@ async fn raw_spot_markets(
     let mut url = core_url.into_url()?;
     url.set_path("/info");
     let resp = client.post(url).json(&InfoRequest::SpotMeta).send().await?;
-    Ok(resp.json().await?)
+    let status = resp.status();
+    let body = resp.text().await.context("spot_meta response body")?;
+    if !status.is_success() {
+        anyhow::bail!("spot_meta HTTP {status} body={body}");
+    }
+    if body.trim().is_empty() || body.trim() == "null" {
+        anyhow::bail!("spot_meta empty/null body HTTP {status}");
+    }
+    serde_json::from_str(&body).with_context(|| format!("spot_meta JSON (HTTP {status})"))
 }
 
 /// Fetches all available spot tokens from HyperCore.
