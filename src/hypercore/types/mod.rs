@@ -3564,6 +3564,10 @@ pub(super) enum InfoRequest {
     AbstractionMode {
         user: Address,
     },
+    ActiveAssetData {
+        user: Address,
+        coin: String,
+    },
 }
 
 #[cfg(test)]

@@ -773,6 +773,21 @@ impl Client {
         self.send_info_request("meta_and_asset_ctxs", &req).await
     }
 
+    /// User leverage and trade-size limits for a perp coin (works without open position).
+    ///
+    /// POST `/info` with `type: "activeAssetData"`.
+    pub async fn active_asset_data(
+        &self,
+        user: Address,
+        coin: impl Into<String>,
+    ) -> Result<super::types::ActiveAssetData> {
+        let req = InfoRequest::ActiveAssetData {
+            user,
+            coin: coin.into(),
+        };
+        self.send_info_request("active_asset_data", &req).await
+    }
+
     /// L2 order book snapshot (at most **20 levels per side** per API docs).
     pub async fn l2_book_info(
         &self,
