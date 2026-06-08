@@ -85,13 +85,18 @@
 //! # }
 //! ```
 
+pub mod asset;
 pub mod error;
 pub mod http;
 pub mod signing;
 pub mod spot_evm_map;
 pub mod types;
+pub mod universe;
 mod utils;
 pub mod ws;
+
+pub use asset::{AssetSpec, parse_asset_spec, perp_name_matches, resolve_perp_market_index};
+pub use universe::{all_perp_dex_names, meta_and_asset_ctxs_for_dexes};
 
 pub use spot_evm_map::SpotEvmMap;
 
@@ -884,6 +889,8 @@ pub struct PerpMarket {
     pub margin_tiers: Vec<MarginTier>,
     /// Price tick configuration for valid price increments
     pub table: PriceTick,
+    /// HIP-3 DEX name when this market belongs to a builder DEX (`None` for native perps).
+    pub dex: Option<String>,
 }
 
 impl PartialEq for PerpMarket {
@@ -1621,10 +1628,10 @@ pub async fn spot_markets(
 /// # Ok(())
 /// # }
 /// ```
-pub async fn perp_dexes(
+async fn raw_perp_dexes(
     core_url: impl IntoUrl,
     client: reqwest::Client,
-) -> anyhow::Result<Vec<Dex>> {
+) -> anyhow::Result<Vec<Option<PerpDex>>> {
     let mut url = core_url.into_url()?;
     url.set_path("/info");
 
@@ -1635,17 +1642,44 @@ pub async fn perp_dexes(
         .await
         .context("info")?;
 
-    let dexes: Vec<Option<PerpDex>> = resp.json().await?;
+    resp.json().await.context("perpDexs")
+}
+
+fn dex_from_perp_dex(index: usize, dex: PerpDex) -> Dex {
+    Dex {
+        name: dex.name,
+        index,
+        deployer_fee_scale: dex.deployer_fee_scale,
+        full_name: dex.full_name,
+        deployer: dex.deployer,
+        oracle_updater: dex.oracle_updater,
+        fee_recipient: dex.fee_recipient,
+        asset_to_funding_multiplier: dex.asset_to_funding_multiplier,
+        asset_to_streaming_oi_cap: dex.asset_to_streaming_oi_cap,
+    }
+}
+
+/// Returns every perp DEX name from `perpDexs`, preserving `null` for the native DEX slot.
+pub async fn perp_dex_name_list(
+    core_url: impl IntoUrl,
+    client: reqwest::Client,
+) -> anyhow::Result<Vec<Option<String>>> {
+    let dexes = raw_perp_dexes(core_url, client).await?;
+    Ok(dexes
+        .into_iter()
+        .map(|dex| dex.map(|dex| dex.name))
+        .collect())
+}
+
+pub async fn perp_dexes(
+    core_url: impl IntoUrl,
+    client: reqwest::Client,
+) -> anyhow::Result<Vec<Dex>> {
+    let dexes = raw_perp_dexes(core_url, client).await?;
     let dex_list = dexes
         .into_iter()
         .enumerate()
-        .filter_map(|(index, dex)| {
-            dex.map(|dex| Dex {
-                name: dex.name,
-                index,
-                deployer_fee_scale: dex.deployer_fee_scale,
-            })
-        })
+        .filter_map(|(index, dex)| dex.map(|dex| dex_from_perp_dex(index, dex)))
         .collect();
 
     Ok(dex_list)
@@ -1666,6 +1700,18 @@ struct PerpDex {
     name: String,
     #[serde(default, with = "rust_decimal::serde::str_option")]
     deployer_fee_scale: Option<Decimal>,
+    #[serde(default)]
+    full_name: Option<String>,
+    #[serde(default)]
+    deployer: Option<Address>,
+    #[serde(default)]
+    oracle_updater: Option<Address>,
+    #[serde(default)]
+    fee_recipient: Option<Address>,
+    #[serde(default)]
+    asset_to_funding_multiplier: Vec<(String, String)>,
+    #[serde(default)]
+    asset_to_streaming_oi_cap: Vec<(String, String)>,
 }
 
 /// Fetches all available perpetual futures markets from HyperCore.
@@ -1722,6 +1768,7 @@ pub async fn perp_markets(
                 margin_table_id: perp.margin_table_id,
                 margin_tiers,
                 table: PriceTick::for_perp(perp.sz_decimals),
+                dex: dex.as_ref().map(|d| d.name.clone()),
             }
         })
         .collect();

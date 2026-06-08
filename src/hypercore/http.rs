@@ -166,6 +166,11 @@ impl Client {
         }
     }
 
+    /// Clone the base URL and HTTP client for standalone `/info` helpers.
+    pub(crate) fn request_parts(&self) -> (Url, reqwest::Client) {
+        (self.base_url.clone(), self.http_client.clone())
+    }
+
     /// Same as [`Self::new`] with a custom per-request timeout.
     pub fn with_request_timeout(chain: Chain, timeout: Duration) -> Self {
         let http_client = reqwest::Client::builder()

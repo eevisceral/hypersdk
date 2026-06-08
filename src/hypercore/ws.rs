@@ -660,21 +660,16 @@ fn heartbeat_on_activity() -> (bool, u8) {
 /// subscription I/O while pongs or market traffic were queued.
 async fn drain_ready_inbound(stream: &mut Stream, tx: &UnboundedSender<Event>) -> bool {
     let mut activity = false;
-    loop {
-        match stream.next().now_or_never() {
-            Some(Some(item)) => {
-                activity = true;
-                match item {
-                    Incoming::Ping => {
-                        let _ = stream.pong().await;
-                    }
-                    Incoming::Pong => {}
-                    item => {
-                        let _ = tx.send(Event::Message(item));
-                    }
-                }
+    while let Some(Some(item)) = stream.next().now_or_never() {
+        activity = true;
+        match item {
+            Incoming::Ping => {
+                let _ = stream.pong().await;
             }
-            Some(None) | None => break,
+            Incoming::Pong => {}
+            item => {
+                let _ = tx.send(Event::Message(item));
+            }
         }
     }
     if stream.drain_activity() {

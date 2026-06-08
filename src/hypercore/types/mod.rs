@@ -173,6 +173,12 @@ pub struct Dex {
     pub(super) name: String,
     pub(super) index: usize,
     pub(super) deployer_fee_scale: Option<Decimal>,
+    pub(super) full_name: Option<String>,
+    pub(super) deployer: Option<Address>,
+    pub(super) oracle_updater: Option<Address>,
+    pub(super) fee_recipient: Option<Address>,
+    pub(super) asset_to_funding_multiplier: Vec<(String, String)>,
+    pub(super) asset_to_streaming_oi_cap: Vec<(String, String)>,
 }
 
 impl Dex {
@@ -191,6 +197,12 @@ impl Dex {
             name,
             index,
             deployer_fee_scale: None,
+            full_name: None,
+            deployer: None,
+            oracle_updater: None,
+            fee_recipient: None,
+            asset_to_funding_multiplier: Vec::new(),
+            asset_to_streaming_oi_cap: Vec::new(),
         }
     }
 
@@ -204,6 +216,42 @@ impl Dex {
     #[must_use]
     pub fn deployer_fee_scale(&self) -> Option<Decimal> {
         self.deployer_fee_scale
+    }
+
+    /// Returns the human-readable DEX name when provided by the API.
+    #[must_use]
+    pub fn full_name(&self) -> Option<&str> {
+        self.full_name.as_deref()
+    }
+
+    /// Returns the deployer wallet address when present.
+    #[must_use]
+    pub fn deployer(&self) -> Option<Address> {
+        self.deployer
+    }
+
+    /// Returns the oracle updater wallet address when present.
+    #[must_use]
+    pub fn oracle_updater(&self) -> Option<Address> {
+        self.oracle_updater
+    }
+
+    /// Returns the fee recipient wallet address when present.
+    #[must_use]
+    pub fn fee_recipient(&self) -> Option<Address> {
+        self.fee_recipient
+    }
+
+    /// Per-asset funding multipliers from the `perpDexs` response.
+    #[must_use]
+    pub fn asset_to_funding_multiplier(&self) -> &[(String, String)] {
+        &self.asset_to_funding_multiplier
+    }
+
+    /// Per-asset streaming open-interest caps from the `perpDexs` response.
+    #[must_use]
+    pub fn asset_to_streaming_oi_cap(&self) -> &[(String, String)] {
+        &self.asset_to_streaming_oi_cap
     }
 }
 
@@ -3439,6 +3487,9 @@ pub struct PerpInfoUniverseItem {
     /// Quote-token alignment flag (wire format may omit).
     #[serde(default, alias = "isAlignedQuoteToken", alias = "isQuoteTokenAligned")]
     pub aligned_quote_token: bool,
+    /// Whether the asset is delisted (omitted when still listed).
+    #[serde(default)]
+    pub is_delisted: Option<bool>,
 }
 
 /// Static perp metadata from `meta` / `metaAndAssetCtxs`.
