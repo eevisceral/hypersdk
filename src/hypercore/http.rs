@@ -60,8 +60,9 @@ use crate::hypercore::{
     ActionError, ApiAgent, CandleInterval, Chain, Cloid, Dex, GossipPriorityAuctionStatus, Market,
     MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, Signature, SpotMarket, SpotToken,
     api::{
-        Action, ActionRequest, ApproveAgent, ConvertToMultiSigUser, GossipPriorityBid, OkResponse,
-        Response, SignersConfig, UpdateLeverage, VaultTransfer,
+        Action, ActionRequest, ApproveAgent, ConvertToMultiSigUser, GossipPriorityBid,
+        NegateOutcomeAction, OkResponse, OutcomeAmountAction, QuestionAmountAction, Response,
+        SignersConfig, UpdateLeverage, VaultTransfer,
     },
     mainnet_url, testnet_url,
     types::{
@@ -390,6 +391,106 @@ impl Client {
     #[inline(always)]
     pub async fn outcomes(&self) -> Result<Vec<super::OutcomeMarket>> {
         super::outcomes(self.base_url.clone(), self.http_client.clone()).await
+    }
+
+    /// Settlement record for a resolved outcome (`null` when unsettled).
+    #[inline(always)]
+    pub async fn settled_outcome(&self, outcome_id: u32) -> Result<Option<super::SettledOutcome>> {
+        super::settled_outcome(self.base_url.clone(), self.http_client.clone(), outcome_id).await
+    }
+
+    /// Split quote into Yes + No shares for an outcome.
+    pub async fn split_outcome<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        outcome_id: u32,
+        amount: Option<&str>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::UserOutcome {
+            split_outcome: Some(OutcomeAmountAction {
+                outcome: outcome_id,
+                amount: amount.map(str::to_string),
+            }),
+            merge_outcome: None,
+            merge_question: None,
+            negate_outcome: None,
+        };
+        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
+            .await
+    }
+
+    /// Merge Yes + No shares into quote for an outcome.
+    pub async fn merge_outcome<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        outcome_id: u32,
+        amount: Option<&str>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::UserOutcome {
+            split_outcome: None,
+            merge_outcome: Some(OutcomeAmountAction {
+                outcome: outcome_id,
+                amount: amount.map(str::to_string),
+            }),
+            merge_question: None,
+            negate_outcome: None,
+        };
+        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
+            .await
+    }
+
+    /// Merge all legs of a categorical question.
+    pub async fn merge_question<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        question_id: u32,
+        amount: Option<&str>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::UserOutcome {
+            split_outcome: None,
+            merge_outcome: None,
+            merge_question: Some(QuestionAmountAction {
+                question: question_id,
+                amount: amount.map(str::to_string),
+            }),
+            negate_outcome: None,
+        };
+        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
+            .await
+    }
+
+    /// Convert No on one outcome into Yes on sibling outcomes in a question.
+    pub async fn negate_outcome<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        question_id: u32,
+        outcome_id: u32,
+        amount: &str,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::UserOutcome {
+            split_outcome: None,
+            merge_outcome: None,
+            merge_question: None,
+            negate_outcome: Some(NegateOutcomeAction {
+                question: question_id,
+                outcome: outcome_id,
+                amount: amount.to_string(),
+            }),
+        };
+        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
+            .await
     }
 
     /// Send an info request to `/info` and deserialize the JSON response.

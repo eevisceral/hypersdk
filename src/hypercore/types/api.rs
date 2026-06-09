@@ -117,6 +117,49 @@ pub enum Action {
     UserDexAbstraction(UserDexAbstractionAction),
     /// User-signed: Set abstraction mode for a user.
     UserSetAbstraction(UserSetAbstractionAction),
+    /// HIP-4 outcome split / merge / negate (exactly one field set).
+    #[serde(rename = "userOutcome")]
+    UserOutcome {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        split_outcome: Option<OutcomeAmountAction>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        merge_outcome: Option<OutcomeAmountAction>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        merge_question: Option<QuestionAmountAction>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        negate_outcome: Option<NegateOutcomeAction>,
+    },
+}
+
+/// Split quote into Yes + No shares for an outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeAmountAction {
+    pub outcome: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+}
+
+/// Merge Yes + No shares into quote for an outcome.
+pub type OutcomeMergeAction = OutcomeAmountAction;
+pub type OutcomeSplitAction = OutcomeAmountAction;
+
+/// Merge all legs of a categorical question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionAmountAction {
+    pub question: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+}
+
+/// Convert No on one outcome into Yes on sibling outcomes in a question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NegateOutcomeAction {
+    pub question: u32,
+    pub outcome: u32,
+    pub amount: String,
 }
 
 impl Action {
@@ -222,7 +265,8 @@ impl Action {
             | Action::Noop
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
-            | Action::AgentSetAbstraction { .. } => {
+            | Action::AgentSetAbstraction { .. }
+            | Action::UserOutcome { .. } => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -328,7 +372,8 @@ impl Action {
             | Action::Noop
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
-            | Action::AgentSetAbstraction { .. } => {
+            | Action::AgentSetAbstraction { .. }
+            | Action::UserOutcome { .. } => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -431,7 +476,8 @@ impl Action {
             | Action::Noop
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
-            | Action::AgentSetAbstraction { .. } => {
+            | Action::AgentSetAbstraction { .. }
+            | Action::UserOutcome { .. } => {
                 let expires_after =
                     maybe_expires_after.map(|after| after.timestamp_millis() as u64);
                 let connection_id = self

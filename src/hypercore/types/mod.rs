@@ -3609,6 +3609,10 @@ pub(super) enum InfoRequest {
         user: Address,
     },
     OutcomeMeta,
+    /// Settlement record for a resolved HIP-4 outcome (null if unsettled).
+    SettledOutcome {
+        outcome: u32,
+    },
     /// Query gossip priority auction status.
     GossipPriorityAuctionStatus,
     /// Query account abstraction mode for a user (`userAbstraction` info type).

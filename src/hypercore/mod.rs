@@ -1825,8 +1825,8 @@ pub async fn outcome_meta(
 
 /// Fetch all outcome markets, returning one [`OutcomeMarket`] per side.
 ///
-/// The market index is calculated as `outcome * 10 + side_index` where
-/// "Yes" gets side index 0 and all other sides get 1.
+/// The market index is `100_000_000 + outcome * 10 + side_index` where
+/// `side_index` is the position in [`OutcomeInfo::side_specs`].
 pub async fn outcomes(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1835,9 +1835,8 @@ pub async fn outcomes(
 
     let mut result = Vec::new();
     for o in &meta.outcomes {
-        for side in &o.side_specs {
-            let is_yes = side.name == "Yes";
-            let market = 100_000_000 + (o.outcome as usize) * 10 + usize::from(!is_yes);
+        for (side_index, side) in o.side_specs.iter().enumerate() {
+            let market = 100_000_000 + (o.outcome as usize) * 10 + side_index;
             result.push(OutcomeMarket {
                 info: o.clone(),
                 side: side.name.clone(),
@@ -1847,6 +1846,78 @@ pub async fn outcomes(
     }
 
     Ok(result)
+}
+
+/// Raw encoding for an outcome side: `10 * outcome_id + side_index`.
+#[must_use]
+pub fn outcome_encoding(outcome_id: u32, side_index: usize) -> usize {
+    (outcome_id as usize) * 10 + side_index
+}
+
+/// Hyperliquid asset index for an outcome side.
+#[must_use]
+pub fn outcome_asset_index(outcome_id: u32, side_index: usize) -> usize {
+    100_000_000 + outcome_encoding(outcome_id, side_index)
+}
+
+/// Exchange coin name (`#1230`) from outcome id + side index.
+#[must_use]
+pub fn outcome_coin(outcome_id: u32, side_index: usize) -> String {
+    format!("#{}", outcome_encoding(outcome_id, side_index))
+}
+
+/// Parse `#encoding` coin into `(outcome_id, side_index)`.
+#[must_use]
+pub fn parse_outcome_coin(coin: &str) -> Option<(u32, u32)> {
+    let raw = coin.trim().strip_prefix('#')?;
+    let encoding: u32 = raw.parse().ok()?;
+    Some((encoding / 10, encoding % 10))
+}
+
+/// Settlement record for a resolved outcome (`settledOutcome` info).
+#[derive(Debug, Clone)]
+pub struct SettledOutcome {
+    pub spec: OutcomeInfo,
+    pub settle_fraction: String,
+    pub details: String,
+}
+
+/// Fetch settlement for one outcome id (`null` when unsettled).
+pub async fn settled_outcome(
+    core_url: impl IntoUrl,
+    client: reqwest::Client,
+    outcome_id: u32,
+) -> anyhow::Result<Option<SettledOutcome>> {
+    let mut url = core_url.into_url()?;
+    url.set_path("/info");
+    let resp = client
+        .post(url)
+        .json(&InfoRequest::SettledOutcome {
+            outcome: outcome_id,
+        })
+        .send()
+        .await?;
+    resp.error_for_status_ref()?;
+    let body = resp.text().await.context("settledOutcome response body")?;
+    if body.trim().is_empty() || body.trim() == "null" {
+        return Ok(None);
+    }
+    let raw: RawSettledOutcome = serde_json::from_str(&body).context("settledOutcome JSON")?;
+    Ok(Some(SettledOutcome {
+        spec: OutcomeInfo {
+            outcome: raw.spec.outcome,
+            name: raw.spec.name,
+            description: raw.spec.description,
+            side_specs: raw
+                .spec
+                .side_specs
+                .into_iter()
+                .map(|s| OutcomeSideSpec { name: s.name })
+                .collect(),
+        },
+        settle_fraction: raw.settle_fraction,
+        details: raw.details,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1884,6 +1955,14 @@ struct RawOutcomeQuestion {
     named_outcomes: Vec<u32>,
     #[serde(default)]
     settled_named_outcomes: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSettledOutcome {
+    spec: RawOutcomeInfo,
+    settle_fraction: String,
+    details: String,
 }
 
 /// Generates an EVM transfer address for cross-chain transfers.
@@ -2393,5 +2472,40 @@ mod tests {
         let meta: RawOutcomeMeta = serde_json::from_str(json).unwrap();
         assert!(meta.outcomes.is_empty());
         assert!(meta.questions.is_empty());
+    }
+
+    #[test]
+    fn outcome_encoding_helpers() {
+        assert_eq!(outcome_encoding(42, 0), 420);
+        assert_eq!(outcome_encoding(42, 1), 421);
+        assert_eq!(outcome_asset_index(42, 0), 100_000_420);
+        assert_eq!(outcome_coin(42, 1), "#421");
+        assert_eq!(parse_outcome_coin("#421"), Some((42, 1)));
+        assert_eq!(parse_outcome_coin("BTC"), None);
+    }
+
+    #[test]
+    fn outcomes_side_index_follows_side_specs_order() {
+        let o = OutcomeInfo {
+            outcome: 5,
+            name: "Test".into(),
+            description: "other".into(),
+            side_specs: vec![
+                OutcomeSideSpec { name: "No".into() },
+                OutcomeSideSpec { name: "Yes".into() },
+            ],
+        };
+        let m0 = OutcomeMarket {
+            info: o.clone(),
+            side: "No".into(),
+            market: outcome_asset_index(5, 0),
+        };
+        let m1 = OutcomeMarket {
+            info: o,
+            side: "Yes".into(),
+            market: outcome_asset_index(5, 1),
+        };
+        assert_eq!(m0.coin(), "#50");
+        assert_eq!(m1.coin(), "#51");
     }
 }
