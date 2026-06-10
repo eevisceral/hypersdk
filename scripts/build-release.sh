@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build hypersdk + hypecli against the checkout (uses root [workspace] + [patch.crates-io]).
+# Build hypersdk + hypecli from alpha workspace root: cd ../.. && cargo build --release -p hypersdk -p hypecli
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

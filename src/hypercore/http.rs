@@ -469,6 +469,7 @@ impl Client {
     }
 
     /// Convert No on one outcome into Yes on sibling outcomes in a question.
+    #[allow(clippy::too_many_arguments)]
     pub async fn negate_outcome<S: Signer + Send + Sync>(
         &self,
         signer: &S,

@@ -205,11 +205,4 @@ rpassword = "7.4.0"
 simple_logger = "5"
 tokio = { version = "1", features = ["full"] }
 
-## Local monorepo: build library + hypecli together with `cargo build --release --workspace`.
-## `hypecli` keeps crates.io-style `hypersdk = { version = "0.2" }`; this patch forces the in-tree SDK.
-[patch.crates-io]
-hypersdk = { path = "." }
-
-[workspace]
-members = ["hypecli"]
-resolver = "3"
+## Workspace root is alpha (parent repo). Build hypecli from alpha root: `cargo build -p hypecli`.
