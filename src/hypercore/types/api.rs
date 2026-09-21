@@ -129,6 +129,31 @@ pub enum Action {
         #[serde(skip_serializing_if = "Option::is_none")]
         negate_outcome: Option<NegateOutcomeAction>,
     },
+    /// Native TWAP (`twapOrder`).
+    TwapOrder(TwapOrderAction),
+}
+
+/// Payload for [`Action::TwapOrder`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwapOrderAction {
+    pub twap: TwapParams,
+}
+
+/// Compact HL TWAP fields (`a,b,s,r,m,t`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwapParams {
+    #[serde(rename = "a")]
+    pub asset: u32,
+    #[serde(rename = "b")]
+    pub is_buy: bool,
+    #[serde(rename = "s")]
+    pub sz: String,
+    #[serde(rename = "r")]
+    pub reduce_only: bool,
+    #[serde(rename = "m")]
+    pub minutes: u32,
+    #[serde(rename = "t")]
+    pub randomize: bool,
 }
 
 /// Split quote into Yes + No shares for an outcome.
@@ -230,6 +255,7 @@ pub enum Response {
 pub enum OkResponse {
     Order { statuses: Vec<OrderResponseStatus> },
     Cancel { statuses: Vec<OrderResponseStatus> },
+    TwapOrder { status: serde_json::Value },
     // should be ok?
     Default,
 }
@@ -266,7 +292,8 @@ impl Action {
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
-            | Action::UserOutcome { .. } => {
+            | Action::UserOutcome { .. }
+            | Action::TwapOrder(_) => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -373,7 +400,8 @@ impl Action {
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
-            | Action::UserOutcome { .. } => {
+            | Action::UserOutcome { .. }
+            | Action::TwapOrder(_) => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -477,7 +505,8 @@ impl Action {
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
-            | Action::UserOutcome { .. } => {
+            | Action::UserOutcome { .. }
+            | Action::TwapOrder(_) => {
                 let expires_after =
                     maybe_expires_after.map(|after| after.timestamp_millis() as u64);
                 let connection_id = self

@@ -62,7 +62,7 @@ use crate::hypercore::{
     api::{
         Action, ActionRequest, ApproveAgent, ConvertToMultiSigUser, GossipPriorityBid,
         NegateOutcomeAction, OkResponse, OutcomeAmountAction, QuestionAmountAction, Response,
-        SignersConfig, UpdateLeverage, VaultTransfer,
+        SignersConfig, TwapOrderAction, UpdateLeverage, VaultTransfer,
     },
     mainnet_url, testnet_url,
     types::{
@@ -1280,6 +1280,27 @@ impl Client {
                     ids: cloids,
                     err: format!("unexpected response type: {resp:?}"),
                 }),
+            }
+        }
+    }
+
+    /// Place a native Hyperliquid TWAP (`twapOrder`). Duration 5–1440 minutes; ~$100 min notional.
+    pub fn twap_order<S: SignerSync>(
+        &self,
+        signer: &S,
+        twap: TwapOrderAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<serde_json::Value, anyhow::Error>> + Send + 'static {
+        let future = self.sign_and_send_sync(signer, twap, nonce, vault_address, expires_after);
+        async move {
+            let resp = future.await?;
+            match resp {
+                Response::Ok(OkResponse::TwapOrder { status }) => Ok(status),
+                Response::Ok(OkResponse::Default) => Ok(serde_json::json!({"ok": true})),
+                Response::Err(err) => anyhow::bail!("{err}"),
+                other => anyhow::bail!("unexpected twap response: {other:?}"),
             }
         }
     }

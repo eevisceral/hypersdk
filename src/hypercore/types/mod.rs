@@ -92,7 +92,7 @@ pub(super) mod solidity;
 pub use api::AbstractionMode;
 pub use api::{
     Action, ActionRequest, GossipPriorityBid, MultiSigAction, MultiSigPayload, OkResponse,
-    Response, UserDexAbstractionAction, UserSetAbstractionAction,
+    Response, TwapOrderAction, TwapParams, UserDexAbstractionAction, UserSetAbstractionAction,
 };
 // Import from raw module (which is now a submodule)
 use api::{AgentSendAssetAction, SendAssetAction, SpotSendAction, UsdSendAction};
