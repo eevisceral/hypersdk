@@ -88,6 +88,7 @@
 pub mod asset;
 pub mod error;
 pub mod http;
+mod info_gate;
 pub mod signing;
 pub mod spot_evm_map;
 pub mod types;
@@ -1508,16 +1509,26 @@ async fn raw_spot_markets(
 ) -> anyhow::Result<SpotTokens> {
     let mut url = core_url.into_url()?;
     url.set_path("/info");
-    let resp = client.post(url).json(&InfoRequest::SpotMeta).send().await?;
-    let status = resp.status();
-    let body = resp.text().await.context("spot_meta response body")?;
-    if !status.is_success() {
-        anyhow::bail!("spot_meta HTTP {status} body={body}");
-    }
-    if body.trim().is_empty() || body.trim() == "null" {
-        anyhow::bail!("spot_meta empty/null body HTTP {status}");
-    }
-    serde_json::from_str(&body).with_context(|| format!("spot_meta JSON (HTTP {status})"))
+    info_gate::with_info_slot("spot_meta", || {
+        let url = url.clone();
+        let client = client.clone();
+        async move {
+            let resp = client.post(url).json(&InfoRequest::SpotMeta).send().await?;
+            let status = resp.status();
+            let body = resp.text().await.context("spot_meta response body")?;
+            if status.as_u16() == 429 {
+                anyhow::bail!("spot_meta HTTP 429 body={body}");
+            }
+            if !status.is_success() {
+                anyhow::bail!("spot_meta HTTP {status} body={body}");
+            }
+            if body.trim().is_empty() || body.trim() == "null" {
+                anyhow::bail!("spot_meta empty/null body HTTP {status}");
+            }
+            serde_json::from_str(&body).with_context(|| format!("spot_meta JSON (HTTP {status})"))
+        }
+    })
+    .await
 }
 
 /// Fetches all available spot tokens from HyperCore.
@@ -1635,14 +1646,23 @@ async fn raw_perp_dexes(
     let mut url = core_url.into_url()?;
     url.set_path("/info");
 
-    let resp = client
-        .post(url)
-        .json(&InfoRequest::PerpDexs)
-        .send()
-        .await
-        .context("info")?;
-
-    resp.json().await.context("perpDexs")
+    info_gate::with_info_slot("perpDexs", || {
+        let url = url.clone();
+        let client = client.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .json(&InfoRequest::PerpDexs)
+                .send()
+                .await
+                .context("info")?;
+            if resp.status().as_u16() == 429 {
+                anyhow::bail!("[perpDexs] HTTP 429 Too Many Requests body=null");
+            }
+            resp.json().await.context("perpDexs")
+        }
+    })
+    .await
 }
 
 fn dex_from_perp_dex(index: usize, dex: PerpDex) -> Dex {
@@ -1727,15 +1747,24 @@ pub async fn perp_markets(
 
     // get it to gather the collateral token
     let spot = raw_spot_markets(url.clone(), client.clone()).await?;
-    let resp = client
-        .post(url)
-        .json(&InfoRequest::Meta {
-            dex: dex.as_ref().map(|dex| dex.name.clone()),
-        })
-        .send()
-        .await
-        .context("meta")?;
-    let data: PerpTokens = resp.json().await?;
+    let data: PerpTokens = info_gate::with_info_slot("meta", || {
+        let url = url.clone();
+        let client = client.clone();
+        let dex_name = dex.as_ref().map(|d| d.name.clone());
+        async move {
+            let resp = client
+                .post(url)
+                .json(&InfoRequest::Meta { dex: dex_name })
+                .send()
+                .await
+                .context("meta")?;
+            if resp.status().as_u16() == 429 {
+                anyhow::bail!("[meta] HTTP 429 Too Many Requests body=null");
+            }
+            resp.json().await.context("meta json")
+        }
+    })
+    .await?;
     let collateral = spot
         .tokens
         .get(data.collateral_token)
@@ -1784,16 +1813,25 @@ pub async fn outcome_meta(
     let mut url = core_url.into_url()?;
     url.set_path("/info");
 
-    let resp = client
-        .post(url)
-        .json(&InfoRequest::OutcomeMeta)
-        .send()
-        .await
-        .context("info")?;
-
-    let raw: RawOutcomeMeta = resp.json().await?;
-
-    Ok(OutcomeMeta {
+    info_gate::with_info_slot("outcomeMeta", || {
+        let url = url.clone();
+        let client = client.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .json(&InfoRequest::OutcomeMeta)
+                .send()
+                .await
+                .context("info")?;
+            if resp.status().as_u16() == 429 {
+                anyhow::bail!("[outcomeMeta] HTTP 429 Too Many Requests body=null");
+            }
+            let raw: RawOutcomeMeta = resp.json().await?;
+            Ok(raw)
+        }
+    })
+    .await
+    .map(|raw: RawOutcomeMeta| OutcomeMeta {
         outcomes: raw
             .outcomes
             .into_iter()
@@ -1890,20 +1928,32 @@ pub async fn settled_outcome(
 ) -> anyhow::Result<Option<SettledOutcome>> {
     let mut url = core_url.into_url()?;
     url.set_path("/info");
-    let resp = client
-        .post(url)
-        .json(&InfoRequest::SettledOutcome {
-            outcome: outcome_id,
-        })
-        .send()
-        .await?;
-    resp.error_for_status_ref()?;
-    let body = resp.text().await.context("settledOutcome response body")?;
-    if body.trim().is_empty() || body.trim() == "null" {
-        return Ok(None);
-    }
-    let raw: RawSettledOutcome = serde_json::from_str(&body).context("settledOutcome JSON")?;
-    Ok(Some(SettledOutcome {
+    let mapped = info_gate::with_info_slot("settledOutcome", || {
+        let url = url.clone();
+        let client = client.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .json(&InfoRequest::SettledOutcome {
+                    outcome: outcome_id,
+                })
+                .send()
+                .await?;
+            if resp.status().as_u16() == 429 {
+                anyhow::bail!("[settledOutcome] HTTP 429 Too Many Requests body=null");
+            }
+            resp.error_for_status_ref()?;
+            let body = resp.text().await.context("settledOutcome response body")?;
+            if body.trim().is_empty() || body.trim() == "null" {
+                return Ok(None);
+            }
+            let raw: RawSettledOutcome =
+                serde_json::from_str(&body).context("settledOutcome JSON")?;
+            Ok(Some(raw))
+        }
+    })
+    .await?
+    .map(|raw| SettledOutcome {
         spec: OutcomeInfo {
             outcome: raw.spec.outcome,
             name: raw.spec.name,
@@ -1917,7 +1967,8 @@ pub async fn settled_outcome(
         },
         settle_fraction: raw.settle_fraction,
         details: raw.details,
-    }))
+    });
+    Ok(mapped)
 }
 
 #[derive(Deserialize)]

@@ -505,20 +505,23 @@ impl Client {
     where
         R: for<'de> Deserialize<'de>,
     {
-        let mut api_url = self.base_url.clone();
-        api_url.set_path("/info");
+        super::info_gate::with_info_slot(label, || async {
+            let mut api_url = self.base_url.clone();
+            api_url.set_path("/info");
 
-        let res = self.http_client.post(api_url).json(&req).send().await?;
-        let status = res.status();
-        let bytes = res.bytes().await?;
-        let text = String::from_utf8_lossy(&bytes);
+            let res = self.http_client.post(api_url).json(&req).send().await?;
+            let status = res.status();
+            let bytes = res.bytes().await?;
+            let text = String::from_utf8_lossy(&bytes);
 
-        if !status.is_success() {
-            return Err(anyhow!("[{label}] HTTP {status} body={text}"));
-        }
+            if !status.is_success() {
+                return Err(anyhow!("[{label}] HTTP {status} body={text}"));
+            }
 
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow!("[{label}] decode failed: {e}; body={text}"))
+            serde_json::from_str(&text)
+                .map_err(|e| anyhow!("[{label}] decode failed: {e}; body={text}"))
+        })
+        .await
     }
 
     /// Returns all open orders for a user.
