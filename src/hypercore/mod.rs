@@ -715,6 +715,14 @@ impl PriceTick {
     /// Example: tick_for() calculates tick size based on price.
     /// See the PriceTick documentation for calculation details.
     pub fn tick_for(&self, price: Decimal) -> Option<Decimal> {
+        // `Decimal::log10` panics on zero and on negatives, and `clamp` panics when
+        // `min > max`, which is what a market whose `sz_decimals` exceeds its decimal
+        // budget produces. Reject both before either is reached: the documented
+        // contract for an invalid price is `None`, not an unwind.
+        if price <= Decimal::ZERO || self.max_decimals < 0 {
+            return None;
+        }
+
         let sig_figs = price.log10();
         // Integer digits = floor(log10(price)) + 1. ceil() and floor+1 agree
         // except when log10(price) is exact (price a power of ten), where
@@ -1127,6 +1135,35 @@ mod tick_tests {
                 price, expected_price, output_price
             );
         }
+    }
+
+    #[test]
+    fn invalid_prices_return_none_instead_of_panicking() {
+        // The documented contract is `None` for an invalid price. `Decimal::log10`
+        // panics on both of these, so the guard has to come first.
+        let perp = PriceTick::for_perp(0);
+        assert_eq!(perp.tick_for(Decimal::ZERO), None);
+        assert_eq!(perp.tick_for(dec!(-1)), None);
+        assert_eq!(perp.tick_for(dec!(-0.5)), None);
+        assert_eq!(perp.round(Decimal::ZERO), None);
+        assert_eq!(perp.round(dec!(-1)), None);
+
+        let spot = PriceTick::for_spot(0);
+        assert_eq!(spot.tick_for(Decimal::ZERO), None);
+        assert_eq!(spot.round(dec!(-1)), None);
+    }
+
+    #[test]
+    fn sz_decimals_beyond_the_decimal_budget_return_none() {
+        // 6 - 7 and 8 - 9 are negative, and `clamp(0, negative)` panics.
+        assert_eq!(PriceTick::for_perp(7).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(8).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_spot(9).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(7).round(dec!(100)), None);
+
+        // The boundary itself still works: 6 - 6 and 8 - 8 are zero, a whole-number tick.
+        assert_eq!(PriceTick::for_perp(6).tick_for(dec!(100)), Some(dec!(1)));
+        assert_eq!(PriceTick::for_spot(8).tick_for(dec!(100)), Some(dec!(1)));
     }
 
     #[test]
