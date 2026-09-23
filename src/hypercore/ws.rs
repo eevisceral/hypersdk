@@ -925,9 +925,12 @@ mod tests {
             first.is_ok(),
             "one coalesced tick should be ready after delay"
         );
-        let second = tokio::time::timeout(Duration::from_millis(5), ping_interval.tick()).await;
+        // A short timeout flakes when the runner stalls past the 10ms period.
+        // A burst catch-up tick returns immediately; Delay waits out the period.
+        let started = tokio::time::Instant::now();
+        ping_interval.tick().await;
         assert!(
-            second.is_err(),
+            started.elapsed() >= Duration::from_millis(8),
             "Delay behavior should not deliver burst catch-up ticks"
         );
     }
