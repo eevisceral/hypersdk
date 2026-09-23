@@ -730,7 +730,10 @@ impl PriceTick {
         let sig_figs_n = sig_figs.floor().to_i32()? as i64 + 1;
         let decimals = 5_i64 - sig_figs_n;
         let max_decimals = decimals.clamp(0, self.max_decimals);
-        Some(Decimal::TEN.powi(-max_decimals))
+        // `powi` panics with "Pow overflowed" past `Decimal`'s 28-place scale, which a
+        // market claiming more than 28 decimals reaches. `checked_powi` gives the `None`
+        // the contract promises.
+        Decimal::TEN.checked_powi(-max_decimals)
     }
 
     /// Rounds a price to the nearest valid tick.
@@ -1164,6 +1167,30 @@ mod tick_tests {
         // The boundary itself still works: 6 - 6 and 8 - 8 are zero, a whole-number tick.
         assert_eq!(PriceTick::for_perp(6).tick_for(dec!(100)), Some(dec!(1)));
         assert_eq!(PriceTick::for_spot(8).tick_for(dec!(100)), Some(dec!(1)));
+    }
+
+    #[test]
+    fn tick_finer_than_decimal_can_hold_returns_none() {
+        // `Decimal` carries at most 28 decimal places, so a market that claims more
+        // than that overflows `10^-max_decimals`. sz_decimals is negative here, which
+        // is what it takes to push `max_decimals` past 28.
+        let perp = PriceTick::for_perp(-23); // max_decimals = 29
+        assert_eq!(perp.tick_for(Decimal::new(1, 28)), None);
+        assert_eq!(perp.round(Decimal::new(1, 28)), None);
+
+        let spot = PriceTick::for_spot(-21); // max_decimals = 29
+        assert_eq!(spot.tick_for(Decimal::new(1, 28)), None);
+
+        // 28 places is the last one that fits, and it still returns a tick.
+        let widest = PriceTick::for_perp(-22); // max_decimals = 28
+        assert_eq!(
+            widest.tick_for(Decimal::new(1, 28)),
+            Some(Decimal::new(1, 28))
+        );
+
+        // A market this wide only overflows for prices small enough to ask for the
+        // extra places; ordinary prices are unaffected.
+        assert_eq!(perp.tick_for(dec!(100)), Some(dec!(0.01)));
     }
 
     #[test]
