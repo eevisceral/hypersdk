@@ -1591,15 +1591,14 @@ pub async fn spot_markets(
     let spot_tokens: Vec<_> = data.tokens.iter().cloned().map(SpotToken::from).collect();
 
     for item in data.universe {
-        let (_, base) = spot_tokens
+        // Universe token ids are `Token.index`, which can diverge from the array slot.
+        let base = spot_tokens
             .iter()
-            .enumerate()
-            .find(|(index, _)| *index as u32 == item.tokens[0])
+            .find(|token| token.index == item.tokens[0])
             .context("base token index not found")?;
-        let (_, quote) = spot_tokens
+        let quote = spot_tokens
             .iter()
-            .enumerate()
-            .find(|(index, _)| *index as u32 == item.tokens[1])
+            .find(|token| token.index == item.tokens[1])
             .context("quote token index not found")?;
 
         markets.push(SpotMarket {
