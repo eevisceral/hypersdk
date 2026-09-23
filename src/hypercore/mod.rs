@@ -715,6 +715,14 @@ impl PriceTick {
     /// Example: tick_for() calculates tick size based on price.
     /// See the PriceTick documentation for calculation details.
     pub fn tick_for(&self, price: Decimal) -> Option<Decimal> {
+        // `Decimal::log10` panics on zero and on negatives, and `clamp` panics when
+        // `min > max`, which is what a market whose `sz_decimals` exceeds its decimal
+        // budget produces. Reject both before either is reached: the documented
+        // contract for an invalid price is `None`, not an unwind.
+        if price <= Decimal::ZERO || self.max_decimals < 0 {
+            return None;
+        }
+
         let sig_figs = price.log10();
         // Integer digits = floor(log10(price)) + 1. ceil() and floor+1 agree
         // except when log10(price) is exact (price a power of ten), where
@@ -722,7 +730,10 @@ impl PriceTick {
         let sig_figs_n = sig_figs.floor().to_i32()? as i64 + 1;
         let decimals = 5_i64 - sig_figs_n;
         let max_decimals = decimals.clamp(0, self.max_decimals);
-        Some(Decimal::TEN.powi(-max_decimals))
+        // `powi` panics with "Pow overflowed" past `Decimal`'s 28-place scale, which a
+        // market claiming more than 28 decimals reaches. `checked_powi` gives the `None`
+        // the contract promises.
+        Decimal::TEN.checked_powi(-max_decimals)
     }
 
     /// Rounds a price to the nearest valid tick.
@@ -1127,6 +1138,59 @@ mod tick_tests {
                 price, expected_price, output_price
             );
         }
+    }
+
+    #[test]
+    fn invalid_prices_return_none_instead_of_panicking() {
+        // The documented contract is `None` for an invalid price. `Decimal::log10`
+        // panics on both of these, so the guard has to come first.
+        let perp = PriceTick::for_perp(0);
+        assert_eq!(perp.tick_for(Decimal::ZERO), None);
+        assert_eq!(perp.tick_for(dec!(-1)), None);
+        assert_eq!(perp.tick_for(dec!(-0.5)), None);
+        assert_eq!(perp.round(Decimal::ZERO), None);
+        assert_eq!(perp.round(dec!(-1)), None);
+
+        let spot = PriceTick::for_spot(0);
+        assert_eq!(spot.tick_for(Decimal::ZERO), None);
+        assert_eq!(spot.round(dec!(-1)), None);
+    }
+
+    #[test]
+    fn sz_decimals_beyond_the_decimal_budget_return_none() {
+        // 6 - 7 and 8 - 9 are negative, and `clamp(0, negative)` panics.
+        assert_eq!(PriceTick::for_perp(7).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(8).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_spot(9).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(7).round(dec!(100)), None);
+
+        // The boundary itself still works: 6 - 6 and 8 - 8 are zero, a whole-number tick.
+        assert_eq!(PriceTick::for_perp(6).tick_for(dec!(100)), Some(dec!(1)));
+        assert_eq!(PriceTick::for_spot(8).tick_for(dec!(100)), Some(dec!(1)));
+    }
+
+    #[test]
+    fn tick_finer_than_decimal_can_hold_returns_none() {
+        // `Decimal` carries at most 28 decimal places, so a market that claims more
+        // than that overflows `10^-max_decimals`. sz_decimals is negative here, which
+        // is what it takes to push `max_decimals` past 28.
+        let perp = PriceTick::for_perp(-23); // max_decimals = 29
+        assert_eq!(perp.tick_for(Decimal::new(1, 28)), None);
+        assert_eq!(perp.round(Decimal::new(1, 28)), None);
+
+        let spot = PriceTick::for_spot(-21); // max_decimals = 29
+        assert_eq!(spot.tick_for(Decimal::new(1, 28)), None);
+
+        // 28 places is the last one that fits, and it still returns a tick.
+        let widest = PriceTick::for_perp(-22); // max_decimals = 28
+        assert_eq!(
+            widest.tick_for(Decimal::new(1, 28)),
+            Some(Decimal::new(1, 28))
+        );
+
+        // A market this wide only overflows for prices small enough to ask for the
+        // extra places; ordinary prices are unaffected.
+        assert_eq!(perp.tick_for(dec!(100)), Some(dec!(0.01)));
     }
 
     #[test]
