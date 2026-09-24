@@ -33,15 +33,16 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
-    let _permit = info_sem()
-        .acquire()
-        .await
-        .map_err(|_| anyhow!("{label}: info slot closed"))?;
     let mut last = None;
     for attempt in 0..MAX_429 {
+        let permit = info_sem()
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("{label}: info slot closed"))?;
         match op().await {
             Ok(v) => return Ok(v),
             Err(e) if is_http_429(&e) && attempt + 1 < MAX_429 => {
+                drop(permit);
                 let delay = Duration::from_millis(retry_after_ms(attempt));
                 log::debug!("{label}: HTTP 429, retry in {}ms", delay.as_millis());
                 tokio::time::sleep(delay).await;
