@@ -14,7 +14,7 @@ use futures::{SinkExt, StreamExt};
 use hypersdk::{
     Address, Decimal,
     hypercore::{
-        self, AssetTarget, HttpClient, NonceHandler, SendAsset, SendToken, Signature,
+        self, AssetTarget, HttpClient, NonceHandler, Signature,
         api::{
             self, Action, ConvertToMultiSigUser, MultiSigAction, MultiSigPayload, SignersConfig,
         },
@@ -33,7 +33,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::{
     SignerArgs,
-    utils::{self, find_signer},
+    utils::{self, find_signers},
 };
 
 /// Multi-sig commands regardless of your location.
@@ -87,11 +87,14 @@ pub struct MultiSigSendAsset {
     /// Destination DEX. Can be "spot" or a dex name.
     #[arg(long)]
     pub dest: Option<String>,
+    /// Sign and submit using only local signers, without starting P2P gossip.
+    #[arg(long)]
+    pub local: bool,
 }
 
 impl MultiSigSendAsset {
     pub async fn run(self) -> anyhow::Result<()> {
-        send_asset(self).await
+        crate::send::SendCmd::from(self).run().await
     }
 }
 
@@ -131,6 +134,9 @@ pub struct MultiSigConvertToNormalUser {
     /// Multi-sig wallet address.
     #[arg(long)]
     pub multi_sig_addr: Address,
+    /// Sign and submit using only local signers, without starting P2P gossip.
+    #[arg(long)]
+    pub local: bool,
 }
 
 impl MultiSigConvertToNormalUser {
@@ -157,6 +163,10 @@ pub struct UpdateMultiSigCmd {
     /// Multi-sig wallet address.
     #[arg(long)]
     multi_sig_addr: Address,
+
+    /// Sign and submit using only local signers, without starting P2P gossip.
+    #[arg(long)]
+    local: bool,
 }
 
 impl UpdateMultiSigCmd {
@@ -179,63 +189,42 @@ const CONNECTING_STRINGS: &[&str] = &[
     "ConnectinG",
 ];
 
-async fn send_asset(cmd: MultiSigSendAsset) -> anyhow::Result<()> {
-    let hl = HttpClient::new(cmd.chain);
-    let multisig_config = hl.multi_sig_config(cmd.multi_sig_addr).await?;
-    let signer = find_signer(&cmd.common, Some(&multisig_config.authorized_users)).await?;
-
-    println!("Using signer {}", signer.address());
-
-    let tokens = hypercore::mainnet().spot_tokens().await?;
-    let token = tokens
-        .iter()
-        .find(|token| token.name == cmd.token)
-        .ok_or(anyhow::anyhow!("token {} not found", cmd.token))?;
-
-    let nonce = NonceHandler::default().next();
-
-    let source_dex: AssetTarget = cmd
-        .source
-        .as_ref()
-        .map(|s| s.parse().unwrap_or(AssetTarget::Perp))
-        .unwrap_or(AssetTarget::Perp);
-
-    let destination_dex: AssetTarget = cmd
-        .dest
-        .as_ref()
-        .map(|s| s.parse().unwrap_or(AssetTarget::Perp))
-        .unwrap_or(AssetTarget::Perp);
-
-    let action = Action::from(
-        SendAsset {
-            destination: cmd.to,
-            source_dex,
-            destination_dex,
-            token: SendToken(token.clone()),
+impl From<MultiSigSendAsset> for crate::send::SendCmd {
+    fn from(cmd: MultiSigSendAsset) -> Self {
+        Self {
+            signer: crate::action::ActionArgs {
+                signer: cmd.common,
+                multi_sig_addr: Some(cmd.multi_sig_addr),
+                local: cmd.local,
+            },
+            token: cmd.token,
             amount: cmd.amount,
-            from_sub_account: "".to_owned(),
-            nonce,
+            destination: Some(cmd.to),
+            from: cmd
+                .source
+                .as_deref()
+                .unwrap_or("perp")
+                .parse()
+                .unwrap_or(AssetTarget::Perp),
+            to: cmd
+                .dest
+                .as_deref()
+                .unwrap_or("perp")
+                .parse()
+                .unwrap_or(AssetTarget::Perp),
+            from_subaccount: None,
         }
-        .into_action(cmd.chain),
-    );
-
-    execute_multisig_action(
-        cmd.multi_sig_addr,
-        hl,
-        signer,
-        action,
-        nonce,
-        &multisig_config,
-    )
-    .await
+    }
 }
 
 async fn update(cmd: UpdateMultiSigCmd) -> anyhow::Result<()> {
     let hl = HttpClient::new(cmd.chain);
     let multisig_config = hl.multi_sig_config(cmd.multi_sig_addr).await?;
-    let signer = find_signer(&cmd.common, Some(&multisig_config.authorized_users)).await?;
+    let signers = find_signers(&cmd.common, &multisig_config.authorized_users).await?;
 
-    println!("Using signer {}", signer.address());
+    for s in &signers {
+        println!("Using signer {}", s.address());
+    }
 
     let nonce = NonceHandler::default().next();
 
@@ -250,23 +239,30 @@ async fn update(cmd: UpdateMultiSigCmd) -> anyhow::Result<()> {
         nonce,
     });
 
-    execute_multisig_action(
+    let response = execute_multisig_action(
         cmd.multi_sig_addr,
         hl,
-        signer,
+        signers,
         action,
         nonce,
         &multisig_config,
+        cmd.local,
+        &cmd.common.trezor,
     )
-    .await
+    .await?;
+    api::Response::Ok(response).into_default()?;
+    println!("Success");
+    Ok(())
 }
 
 async fn convert_to_normal_user(cmd: MultiSigConvertToNormalUser) -> anyhow::Result<()> {
     let hl = HttpClient::new(cmd.chain);
     let multisig_config = hl.multi_sig_config(cmd.multi_sig_addr).await?;
-    let signer = find_signer(&cmd.common, Some(&multisig_config.authorized_users)).await?;
+    let signers = find_signers(&cmd.common, &multisig_config.authorized_users).await?;
 
-    println!("Using signer {}", signer.address());
+    for s in &signers {
+        println!("Using signer {}", s.address());
+    }
     println!(
         "Converting multisig account {} to normal user",
         cmd.multi_sig_addr
@@ -284,25 +280,32 @@ async fn convert_to_normal_user(cmd: MultiSigConvertToNormalUser) -> anyhow::Res
         nonce,
     });
 
-    execute_multisig_action(
+    let response = execute_multisig_action(
         cmd.multi_sig_addr,
         hl,
-        signer,
+        signers,
         action,
         nonce,
         &multisig_config,
+        cmd.local,
+        &cmd.common.trezor,
     )
-    .await
+    .await?;
+    api::Response::Ok(response).into_default()?;
+    println!("Success");
+    Ok(())
 }
 
 async fn sign(cmd: MultiSigSign) -> anyhow::Result<()> {
     let multisig_config = HttpClient::new(cmd.chain)
         .multi_sig_config(cmd.multi_sig_addr)
         .await?;
-    let signer = find_signer(&cmd.common, Some(&multisig_config.authorized_users)).await?;
-    let key = utils::make_key(&signer);
+    let signers = find_signers(&cmd.common, &multisig_config.authorized_users).await?;
+    let key = utils::make_key(&signers[0]);
 
-    println!("Signer found using {}", signer.address());
+    for s in &signers {
+        println!("Signer found using {}", s.address());
+    }
 
     let pb = ProgressBar::new_spinner();
     pb.enable_steady_tick(Duration::from_millis(100));
@@ -315,7 +318,6 @@ async fn sign(cmd: MultiSigSign) -> anyhow::Result<()> {
     let (endpoint, _ticket) = utils::start_gossip(key, true).await?;
 
     let addr = cmd.connect.endpoint_addr();
-    // force connect and handle the connection
     let conn = endpoint.connect(addr.clone(), proto::ALPN).await?;
 
     pb.finish_and_clear();
@@ -329,20 +331,56 @@ async fn sign(cmd: MultiSigSign) -> anyhow::Result<()> {
 
     match read.next().await {
         Some(Ok(proto::Message::Action(nonce, action))) => {
+            validate_proposal(
+                &action,
+                cmd.multi_sig_addr,
+                &multisig_config.authorized_users,
+            )?;
             println!("{:#?}", action);
             print!("Accept (y/n)? ");
             let _ = stdout().flush();
             let mut input = [0u8; 1];
             let _ = stdin().read_exact(&mut input).await;
             if input[0] == b'y' {
-                let signature = action.sign(&signer, nonce, cmd.chain).await?;
-                write.send(proto::Message::Signature(signature)).await?;
+                let mut signed_addresses: Vec<Address> = Vec::new();
+                for signer in &signers {
+                    let signature = action.sign(signer, nonce, cmd.chain).await?;
+                    println!("Signed with {}", signer.address());
+                    signed_addresses.push(signer.address());
+                    write.send(proto::Message::Signature(signature)).await?;
+                }
+                loop {
+                    println!(
+                        "Swap hardware wallet and press Enter to scan, or any other key to finish."
+                    );
+                    let mut swap_input = [0u8; 1];
+                    let _ = stdin().read_exact(&mut swap_input).await;
+                    if swap_input[0] != b'\n' {
+                        break;
+                    }
+                    let new_signers = utils::scan_hw_signers(
+                        &cmd.common.trezor,
+                        &multisig_config.authorized_users,
+                        &signed_addresses,
+                    )
+                    .await?;
+                    if new_signers.is_empty() {
+                        println!("No new hardware wallets found.");
+                        continue;
+                    }
+                    for signer in &new_signers {
+                        let signature = action.sign(signer, nonce, cmd.chain).await?;
+                        println!("Signed with {}", signer.address());
+                        signed_addresses.push(signer.address());
+                        write.send(proto::Message::Signature(signature)).await?;
+                    }
+                }
             } else {
                 println!("Rejected");
             }
         }
         _ => {
-            panic!("unexpected message");
+            anyhow::bail!("peer did not send a multisig proposal");
         }
     }
 
@@ -355,15 +393,109 @@ async fn sign(cmd: MultiSigSign) -> anyhow::Result<()> {
 /// Execute a multisig action by collecting signatures from authorized signers.
 ///
 /// This is the core multisig execution logic used by all multisig commands.
-async fn execute_multisig_action(
+pub(crate) async fn execute_multisig_action(
     multi_sig_addr: Address,
     hl: HttpClient,
-    signer: Box<dyn Signer + Send + Sync>,
+    signers: Vec<Box<dyn Signer + Send + Sync>>,
     inner_action: Action,
     nonce: u64,
     multisig_config: &hypersdk::hypercore::MultiSigConfig,
+    local: bool,
+    trezor_args: &crate::trezor::TrezorArgs,
+) -> anyhow::Result<api::OkResponse> {
+    let lead_signer = signers
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no signers found"))?;
+
+    let action = MultiSigPayload {
+        multi_sig_user: multi_sig_addr.to_string().to_lowercase(),
+        outer_signer: lead_signer.address().to_string().to_lowercase(),
+        action: Box::new(inner_action),
+    };
+    validate_proposal(&action, multi_sig_addr, &multisig_config.authorized_users)?;
+
+    let mut signatures = vec![];
+    let mut signed_addresses: Vec<Address> = Vec::new();
+
+    for signer in &signers {
+        if multisig_config.authorized_users.contains(&signer.address())
+            && !signed_addresses.contains(&signer.address())
+        {
+            println!(
+                "Using local signer {} to sign message:\n{action:#?}",
+                signer.address()
+            );
+            let signature = action.sign(signer, nonce, hl.chain()).await?;
+            record_signature(
+                &action,
+                signature,
+                nonce,
+                hl.chain(),
+                &multisig_config.authorized_users,
+                &mut signatures,
+                &mut signed_addresses,
+            )?;
+        }
+    }
+
+    if !local && signatures.len() < multisig_config.threshold {
+        collect_remote_signatures(
+            &action,
+            &mut signatures,
+            &mut signed_addresses,
+            nonce,
+            &hl,
+            multi_sig_addr,
+            multisig_config,
+            lead_signer,
+            trezor_args,
+        )
+        .await?;
+    }
+    if signatures.len() < multisig_config.threshold {
+        anyhow::bail!(
+            "not enough local signers: have {} but need {}",
+            signatures.len(),
+            multisig_config.threshold
+        );
+    }
+
+    let multi_sig_action = MultiSigAction {
+        signature_chain_id: hl.chain().arbitrum_id().to_owned(),
+        signatures,
+        payload: action,
+    };
+
+    let req = hypercore::signing::multisig_lead_msg(
+        lead_signer,
+        multi_sig_action,
+        nonce,
+        None,
+        None,
+        hl.chain(),
+    )
+    .await?;
+
+    match hl.send(req).await? {
+        api::Response::Ok(response) => Ok(response),
+        api::Response::Err(err) => {
+            anyhow::bail!("{err}");
+        }
+    }
+}
+
+async fn collect_remote_signatures(
+    action: &MultiSigPayload,
+    signatures: &mut Vec<Signature>,
+    signed_addresses: &mut Vec<Address>,
+    nonce: u64,
+    hl: &HttpClient,
+    multi_sig_addr: Address,
+    multisig_config: &hypersdk::hypercore::MultiSigConfig,
+    lead_signer: &(dyn Signer + Send + Sync),
+    trezor_args: &crate::trezor::TrezorArgs,
 ) -> anyhow::Result<()> {
-    let key = utils::make_key(&signer);
+    let key = utils::make_key(lead_signer);
 
     let pb = ProgressBar::new_spinner();
     pb.enable_steady_tick(Duration::from_millis(100));
@@ -377,24 +509,44 @@ async fn execute_multisig_action(
 
     pb.finish_and_clear();
 
-    let action = MultiSigPayload {
-        multi_sig_user: multi_sig_addr.to_string().to_lowercase(),
-        outer_signer: signer.address().to_string().to_lowercase(),
-        action: Box::new(inner_action),
-    };
-
-    let mut signatures = vec![];
-
     let pb = ProgressBar::new(multisig_config.threshold as u64);
     pb.set_style(ProgressStyle::with_template("{msg}\nAuthorized {pos}/{len}").unwrap());
+    pb.set_position(signatures.len() as u64);
 
-    if multisig_config.authorized_users.contains(&signer.address()) {
+    while signatures.len() < multisig_config.threshold {
         println!(
-            "Using current signer {} to sign message:\n{action:#?}",
-            signer.address()
+            "Swap hardware wallet and press Enter to scan, or any other key to wait for P2P peers."
         );
-        signatures.push(action.sign(&signer, nonce, hl.chain()).await?);
-        pb.inc(1);
+        let mut input = [0u8; 1];
+        let _ = tokio::io::stdin().read_exact(&mut input).await;
+        if input[0] != b'\n' {
+            break;
+        }
+        let new_signers = utils::scan_hw_signers(
+            trezor_args,
+            &multisig_config.authorized_users,
+            signed_addresses,
+        )
+        .await?;
+        if new_signers.is_empty() {
+            println!("No new hardware wallets found.");
+            continue;
+        }
+        for signer in &new_signers {
+            println!("Found new signer {}", signer.address());
+            let signature = action.sign(signer, nonce, hl.chain()).await?;
+            if record_signature(
+                action,
+                signature,
+                nonce,
+                hl.chain(),
+                &multisig_config.authorized_users,
+                signatures,
+                signed_addresses,
+            )? {
+                pb.inc(1);
+            }
+        }
     }
 
     let (tx, mut rx) = unbounded_channel();
@@ -418,20 +570,14 @@ async fn execute_multisig_action(
         tokio::select! {
             _ = ctrl_c() => {
                 router.shutdown().await?;
-                return Ok(());
+                anyhow::bail!("multisig signing cancelled");
             }
             Some(signature) = rx.recv() => {
                 writeln!(&mut msgs, "> Receive signature {signature}")?;
-                match action.recover(&signature, nonce, hl.chain()) {
-                    Ok(address) => {
-                        if !multisig_config.authorized_users.contains(&address) {
-                            writeln!(&mut msgs, ">X Received signature from unauthorized user {address}")?;
-                        } else {
-                            pb.inc(1);
-                            writeln!(&mut msgs, "> Received: {signature}")?;
-                            signatures.push(signature);
-                        }
-                    }
+                match record_signature(action, signature, nonce, hl.chain(), &multisig_config.authorized_users,
+                    signatures, signed_addresses) {
+                    Ok(true) => pb.inc(1),
+                    Ok(false) => writeln!(&mut msgs, "> Ignored duplicate signer")?,
                     Err(err) => {
                         let _ = writeln!(&mut msgs, ">X unable to verify signature: {err}");
                     }
@@ -441,35 +587,50 @@ async fn execute_multisig_action(
     }
 
     pb.finish_and_clear();
-
-    let multi_sig_action = MultiSigAction {
-        signature_chain_id: hl.chain().arbitrum_id().to_owned(),
-        signatures,
-        payload: action,
-    };
-
-    let req = hypercore::signing::multisig_lead_msg(
-        &signer,
-        multi_sig_action,
-        nonce,
-        None,
-        None,
-        hl.chain(),
-    )
-    .await?;
-
-    match hl.send(req).await? {
-        api::Response::Ok(_) => {
-            println!("Success");
-        }
-        api::Response::Err(err) => {
-            println!("error: {err}");
-        }
-    }
-
     router.shutdown().await?;
 
     Ok(())
+}
+
+fn validate_proposal(
+    action: &MultiSigPayload,
+    expected_account: Address,
+    authorized_users: &[Address],
+) -> anyhow::Result<()> {
+    let account: Address = action.multi_sig_user.parse()?;
+    anyhow::ensure!(
+        account == expected_account,
+        "proposal targets {account}, expected {expected_account}"
+    );
+    let lead: Address = action.outer_signer.parse()?;
+    anyhow::ensure!(
+        authorized_users.contains(&lead),
+        "proposal leader {lead} is not an authorized signer"
+    );
+    Ok(())
+}
+
+/// Count each authorized address once, regardless of which transport delivered it.
+fn record_signature(
+    action: &MultiSigPayload,
+    signature: Signature,
+    nonce: u64,
+    chain: hypercore::Chain,
+    authorized_users: &[Address],
+    signatures: &mut Vec<Signature>,
+    signed_addresses: &mut Vec<Address>,
+) -> anyhow::Result<bool> {
+    let address = action.recover(&signature, nonce, chain)?;
+    anyhow::ensure!(
+        authorized_users.contains(&address),
+        "signature from unauthorized user {address}"
+    );
+    if signed_addresses.contains(&address) {
+        return Ok(false);
+    }
+    signatures.push(signature);
+    signed_addresses.push(address);
+    Ok(true)
 }
 
 mod proto {
@@ -547,10 +708,9 @@ mod proto {
                     match read.next().await {
                         Some(Ok(Message::Signature(sig))) => {
                             let _ = tx.send(sig);
-                            break Ok(());
                         }
-                        // just read the Hello
                         Some(Ok(Message::Hello)) => {}
+                        None => break Ok(()),
                         _ => {
                             println!("received unexpected msg");
                         }
@@ -558,5 +718,109 @@ mod proto {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::signers::local::PrivateKeySigner;
+    use hypercore::Chain;
+
+    fn payload(lead: Address) -> MultiSigPayload {
+        MultiSigPayload {
+            multi_sig_user: "0x1111111111111111111111111111111111111111".into(),
+            outer_signer: lead.to_string().to_lowercase(),
+            action: Box::new(Action::Noop),
+        }
+    }
+
+    #[test]
+    fn proposal_must_target_requested_wallet_and_authorized_leader() {
+        let signer = PrivateKeySigner::random();
+        let proposal = payload(signer.address());
+        let account = proposal.multi_sig_user.parse().unwrap();
+        validate_proposal(&proposal, account, &[signer.address()]).unwrap();
+        assert!(validate_proposal(&proposal, Address::ZERO, &[signer.address()]).is_err());
+        assert!(validate_proposal(&proposal, account, &[Address::ZERO]).is_err());
+    }
+
+    #[test]
+    fn repeated_and_unauthorized_signatures_do_not_advance_threshold() {
+        let first = PrivateKeySigner::random();
+        let second = PrivateKeySigner::random();
+        let outsider = PrivateKeySigner::random();
+        let action = payload(first.address());
+        let authorized = [first.address(), second.address()];
+        let mut signatures = Vec::new();
+        let mut addresses = Vec::new();
+        let nonce = 1_700_000_000_000;
+        let first_sig = action.sign_sync(&first, nonce, Chain::Mainnet).unwrap();
+        assert!(
+            record_signature(
+                &action,
+                first_sig.clone(),
+                nonce,
+                Chain::Mainnet,
+                &authorized,
+                &mut signatures,
+                &mut addresses
+            )
+            .unwrap()
+        );
+        assert!(
+            !record_signature(
+                &action,
+                first_sig.clone(),
+                nonce,
+                Chain::Mainnet,
+                &authorized,
+                &mut signatures,
+                &mut addresses
+            )
+            .unwrap()
+        );
+        assert!(
+            record_signature(
+                &action,
+                action.sign_sync(&outsider, nonce, Chain::Mainnet).unwrap(),
+                nonce,
+                Chain::Mainnet,
+                &authorized,
+                &mut signatures,
+                &mut addresses
+            )
+            .is_err()
+        );
+        let mut malformed = first_sig;
+        malformed.v = 2;
+        assert!(
+            record_signature(
+                &action,
+                malformed,
+                nonce,
+                Chain::Mainnet,
+                &authorized,
+                &mut signatures,
+                &mut addresses
+            )
+            .is_err()
+        );
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(addresses, [first.address()]);
+        assert!(
+            record_signature(
+                &action,
+                action.sign_sync(&second, nonce, Chain::Mainnet).unwrap(),
+                nonce,
+                Chain::Mainnet,
+                &authorized,
+                &mut signatures,
+                &mut addresses
+            )
+            .unwrap()
+        );
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(addresses, authorized);
     }
 }

@@ -7,10 +7,14 @@
 
 use std::fs;
 
+use alloy::signers::{self, Signer, ledger::LedgerSigner};
 use clap::{Args, Subcommand};
 use hypersdk::hypercore::PrivateKeySigner;
 
-use crate::utils::keystore_dir;
+use crate::{
+    trezor::{self, TrezorArgs},
+    utils::keystore_dir,
+};
 
 /// Account management commands.
 #[derive(Subcommand)]
@@ -19,6 +23,8 @@ pub enum AccountCmd {
     Create(CreateCmd),
     /// List available keystores
     List(ListCmd),
+    /// Test hardware wallet signer (Ledger/Trezor)
+    TestSigner(TestSignerCmd),
 }
 
 impl AccountCmd {
@@ -26,6 +32,7 @@ impl AccountCmd {
         match self {
             Self::Create(cmd) => cmd.run().await,
             Self::List(cmd) => cmd.run().await,
+            Self::TestSigner(cmd) => cmd.run().await,
         }
     }
 }
@@ -155,5 +162,49 @@ impl ListCmd {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Args)]
+pub struct TestSignerCmd {
+    #[command(flatten)]
+    pub trezor: TrezorArgs,
+}
+
+impl TestSignerCmd {
+    pub async fn run(self) -> anyhow::Result<()> {
+        let msg = b"hypecli test";
+
+        println!("Scanning for Trezor...");
+        if let Some(signer) = trezor::find_signers(&self.trezor, None, true)?
+            .into_iter()
+            .next()
+        {
+            println!("  Found Trezor account: {}", signer.address());
+            let signature = signer.sign_message(msg).await?;
+            anyhow::ensure!(
+                signature.recover_address_from_msg(msg)? == signer.address(),
+                "Trezor test signature does not match the selected address"
+            );
+            println!("  Signature: 0x{}", hex::encode(signature.as_bytes()));
+            return Ok(());
+        }
+
+        println!("Scanning for Ledger...");
+        for i in 0..5 {
+            match LedgerSigner::new(signers::ledger::HDPath::LedgerLive(i), Some(1)).await {
+                Ok(signer) => {
+                    println!("  Found Ledger account {i}: {}", signer.address());
+                    match signer.sign_message(msg).await {
+                        Ok(sig) => println!("  Signature: 0x{}", hex::encode(sig.as_bytes())),
+                        Err(e) => println!("  Sign failed: {e}"),
+                    }
+                    return Ok(());
+                }
+                Err(_) => continue,
+            }
+        }
+
+        anyhow::bail!("No hardware wallet found")
     }
 }

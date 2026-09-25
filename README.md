@@ -155,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
             cloid: Default::default(),
         }],
         grouping: OrderGrouping::Na,
+        None,
     };
 
     let nonce = chrono::Utc::now().timestamp_millis() as u64;
@@ -182,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
         coin: "ETH".into(),
         n_sig_figs: None,
         mantissa: None,
+        fast: false,
     });
 
     // Optional: user streams
@@ -352,7 +354,14 @@ if let Some(dex) = dexes.first() {
 
 ### Multi-Sig Support
 
-The SDK supports multi-signature operations for orders and transfers:
+The SDK supports multi-signature operations for orders, transfers, agent and builder
+approvals, staking delegation, and account settings. User-signed actions use their
+EIP-712 schema with the multisig fields included.
+
+For manual signature collection with a vault or expiry, use
+`multisig_collect_signatures_with_context` or the `MultiSigPayload::*_with_context`
+methods. Every inner signature must use the same vault and expiry as the outer
+request. The order builder's `.place()` method handles this automatically.
 
 ```rust
 use hypersdk::hypercore::{self, PrivateKeySigner};

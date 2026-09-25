@@ -50,6 +50,7 @@
 //!     coin: "BTC".into(),
 //!     n_sig_figs: None,
 //!     mantissa: None,
+//!     fast: false,
 //! });
 //!
 //! while let Some(event) = ws.next().await {
@@ -90,6 +91,8 @@ pub mod error;
 pub mod http;
 mod info_gate;
 pub mod signing;
+#[cfg(test)]
+mod signing_tests;
 pub mod spot_evm_map;
 pub mod types;
 pub mod universe;
@@ -116,7 +119,7 @@ use anyhow::Context;
 use chrono::Utc;
 use either::Either;
 /// Re-export error types.
-pub use error::{ActionError, Error};
+pub use error::{ActionError, ApiError};
 use reqwest::IntoUrl;
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
@@ -721,11 +724,25 @@ impl PriceTick {
     /// Example: tick_for() calculates tick size based on price.
     /// See the PriceTick documentation for calculation details.
     pub fn tick_for(&self, price: Decimal) -> Option<Decimal> {
+        // `Decimal::log10` panics on zero and on negatives, and `clamp` panics when
+        // `min > max`, which is what a market whose `sz_decimals` exceeds its decimal
+        // budget produces. Reject both before either is reached: the documented
+        // contract for an invalid price is `None`, not an unwind.
+        if price <= Decimal::ZERO || self.max_decimals < 0 {
+            return None;
+        }
+
         let sig_figs = price.log10();
-        let sig_figs_n = sig_figs.ceil().to_i32()? as i64;
+        // Integer digits = floor(log10(price)) + 1. ceil() and floor+1 agree
+        // except when log10(price) is exact (price a power of ten), where
+        // ceil() undercounts by one and yields a tick ten times too fine.
+        let sig_figs_n = sig_figs.floor().to_i32()? as i64 + 1;
         let decimals = 5_i64 - sig_figs_n;
         let max_decimals = decimals.clamp(0, self.max_decimals);
-        Some(Decimal::TEN.powi(-max_decimals))
+        // `powi` panics with "Pow overflowed" past `Decimal`'s 28-place scale, which a
+        // market claiming more than 28 decimals reaches. `checked_powi` gives the `None`
+        // the contract promises.
+        Decimal::TEN.checked_powi(-max_decimals)
     }
 
     /// Rounds a price to the nearest valid tick.
@@ -808,7 +825,7 @@ impl PriceTick {
                 RoundingStrategy::ToNegativeInfinity
             }
         };
-        let rounded = price.round_dp_with_strategy(tick.scale(), strategy);
+        let rounded = (price / tick).round_dp_with_strategy(0, strategy) * tick;
         Some(rounded)
     }
 }
@@ -880,14 +897,18 @@ pub struct PerpMarket {
     pub isolated_margin: bool,
     /// Margin mode for this market
     pub margin_mode: Option<MarginMode>,
+    /// The deployer fee scale for this market.
+    pub deployer_fee_scale: Option<Decimal>,
     /// Whether growth mode is enabled for this market
     pub growth_mode: bool,
     /// Whether the quote token is aligned for this market
     pub aligned_quote_token: bool,
     /// `meta` margin table id for this asset.
     pub margin_table_id: u64,
-    /// Resolved margin tiers (empty when table missing).
+    /// Resolved margin tiers (empty when the table is missing).
     pub margin_tiers: Vec<MarginTier>,
+    /// Whether this market is delisted.
+    pub delisted: bool,
     /// Price tick configuration for valid price increments
     pub table: PriceTick,
     /// HIP-3 DEX name when this market belongs to a builder DEX (`None` for native perps).
@@ -1171,6 +1192,59 @@ mod tick_tests {
     }
 
     #[test]
+    fn invalid_prices_return_none_instead_of_panicking() {
+        // The documented contract is `None` for an invalid price. `Decimal::log10`
+        // panics on both of these, so the guard has to come first.
+        let perp = PriceTick::for_perp(0);
+        assert_eq!(perp.tick_for(Decimal::ZERO), None);
+        assert_eq!(perp.tick_for(dec!(-1)), None);
+        assert_eq!(perp.tick_for(dec!(-0.5)), None);
+        assert_eq!(perp.round(Decimal::ZERO), None);
+        assert_eq!(perp.round(dec!(-1)), None);
+
+        let spot = PriceTick::for_spot(0);
+        assert_eq!(spot.tick_for(Decimal::ZERO), None);
+        assert_eq!(spot.round(dec!(-1)), None);
+    }
+
+    #[test]
+    fn sz_decimals_beyond_the_decimal_budget_return_none() {
+        // 6 - 7 and 8 - 9 are negative, and `clamp(0, negative)` panics.
+        assert_eq!(PriceTick::for_perp(7).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(8).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_spot(9).tick_for(dec!(100)), None);
+        assert_eq!(PriceTick::for_perp(7).round(dec!(100)), None);
+
+        // The boundary itself still works: 6 - 6 and 8 - 8 are zero, a whole-number tick.
+        assert_eq!(PriceTick::for_perp(6).tick_for(dec!(100)), Some(dec!(1)));
+        assert_eq!(PriceTick::for_spot(8).tick_for(dec!(100)), Some(dec!(1)));
+    }
+
+    #[test]
+    fn tick_finer_than_decimal_can_hold_returns_none() {
+        // `Decimal` carries at most 28 decimal places, so a market that claims more
+        // than that overflows `10^-max_decimals`. sz_decimals is negative here, which
+        // is what it takes to push `max_decimals` past 28.
+        let perp = PriceTick::for_perp(-23); // max_decimals = 29
+        assert_eq!(perp.tick_for(Decimal::new(1, 28)), None);
+        assert_eq!(perp.round(Decimal::new(1, 28)), None);
+
+        let spot = PriceTick::for_spot(-21); // max_decimals = 29
+        assert_eq!(spot.tick_for(Decimal::new(1, 28)), None);
+
+        // 28 places is the last one that fits, and it still returns a tick.
+        let widest = PriceTick::for_perp(-22); // max_decimals = 28
+        assert_eq!(
+            widest.tick_for(Decimal::new(1, 28)),
+            Some(Decimal::new(1, 28))
+        );
+
+        // A market this wide only overflows for prices small enough to ask for the
+        // extra places; ordinary prices are unaffected.
+        assert_eq!(perp.tick_for(dec!(100)), Some(dec!(0.01)));
+    }
+
+    #[test]
     fn test_spot() {
         let prices = vec![
             (5, dec!(93231.23), dec!(1), dec!(93231)),
@@ -1202,6 +1276,26 @@ mod tick_tests {
                 price, expected_price, output_price
             );
         }
+    }
+
+    #[test]
+    fn power_of_ten_prices_keep_five_sig_figs() {
+        // Prices that are exact powers of ten exercise the difference
+        // between ceil(log10) and floor(log10) + 1. The latter is the
+        // documented algorithm; the former undercounts the integer digits
+        // by one and yields a tick ten times too fine.
+        let table = PriceTick::for_perp(0); // max_decimals = 6
+        for (price, expected_tick) in [
+            (dec!(1000), dec!(0.1)),
+            (dec!(100), dec!(0.01)),
+            (dec!(10), dec!(0.001)),
+            (dec!(1), dec!(0.0001)),
+        ] {
+            assert_eq!(table.tick_for(price), Some(expected_tick), "{price}");
+        }
+
+        let spot = PriceTick::for_spot(0); // max_decimals = 8
+        assert_eq!(spot.tick_for(dec!(1000)), Some(dec!(0.1)));
     }
 }
 
@@ -1591,14 +1685,15 @@ pub async fn spot_markets(
     let spot_tokens: Vec<_> = data.tokens.iter().cloned().map(SpotToken::from).collect();
 
     for item in data.universe {
-        // Universe token ids are `Token.index`, which can diverge from the array slot.
+        // Match by the token's `index` field, not its position in the `tokens`
+        // array. Indices are not contiguous after delistings.
         let base = spot_tokens
             .iter()
-            .find(|token| token.index == item.tokens[0])
+            .find(|t| t.index == item.tokens[0])
             .context("base token index not found")?;
         let quote = spot_tokens
             .iter()
-            .find(|token| token.index == item.tokens[1])
+            .find(|t| t.index == item.tokens[1])
             .context("quote token index not found")?;
 
         markets.push(SpotMarket {
@@ -1668,13 +1763,6 @@ fn dex_from_perp_dex(index: usize, dex: PerpDex) -> Dex {
     Dex {
         name: dex.name,
         index,
-        deployer_fee_scale: dex.deployer_fee_scale,
-        full_name: dex.full_name,
-        deployer: dex.deployer,
-        oracle_updater: dex.oracle_updater,
-        fee_recipient: dex.fee_recipient,
-        asset_to_funding_multiplier: dex.asset_to_funding_multiplier,
-        asset_to_streaming_oi_cap: dex.asset_to_streaming_oi_cap,
     }
 }
 
@@ -1717,20 +1805,6 @@ pub async fn perp_dexs(
 #[serde(rename_all = "camelCase")]
 struct PerpDex {
     name: String,
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    deployer_fee_scale: Option<Decimal>,
-    #[serde(default)]
-    full_name: Option<String>,
-    #[serde(default)]
-    deployer: Option<Address>,
-    #[serde(default)]
-    oracle_updater: Option<Address>,
-    #[serde(default)]
-    fee_recipient: Option<Address>,
-    #[serde(default)]
-    asset_to_funding_multiplier: Vec<(String, String)>,
-    #[serde(default)]
-    asset_to_streaming_oi_cap: Vec<(String, String)>,
 }
 
 /// Fetches all available perpetual futures markets from HyperCore.
@@ -1791,10 +1865,12 @@ pub async fn perp_markets(
                 collateral: collateral.clone(),
                 isolated_margin: perp.only_isolated,
                 margin_mode: perp.margin_mode,
+                deployer_fee_scale: perp.deployer_fee_scale,
                 growth_mode: perp.growth_mode,
                 aligned_quote_token: perp.aligned_quote_token,
                 margin_table_id: perp.margin_table_id,
                 margin_tiers,
+                delisted: perp.delisted,
                 table: PriceTick::for_perp(perp.sz_decimals),
                 dex: dex.as_ref().map(|d| d.name.clone()),
             }
@@ -1934,7 +2010,7 @@ pub async fn settled_outcome(
             let resp = client
                 .post(url)
                 .json(&InfoRequest::SettledOutcome {
-                    outcome: outcome_id,
+                    outcome: u64::from(outcome_id),
                 })
                 .send()
                 .await?;
@@ -2090,12 +2166,16 @@ struct PerpUniverseItem {
     only_isolated: bool,
     margin_mode: Option<MarginMode>,
     sz_decimals: i64,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    deployer_fee_scale: Option<Decimal>,
     #[serde(default, deserialize_with = "deserialize_growth_mode")]
     growth_mode: bool,
     #[serde(default, alias = "isAlignedQuoteToken", alias = "isQuoteTokenAligned")]
     aligned_quote_token: bool,
     #[serde(default)]
     margin_table_id: u64,
+    #[serde(default, alias = "isDelisted")]
+    delisted: bool,
 }
 
 fn deserialize_growth_mode<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -2125,14 +2205,14 @@ pub enum MarginMode {
     NoCross,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SpotTokens {
     universe: Vec<SpotUniverseItem>,
     tokens: Vec<Token>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SpotUniverseItem {
     // base and quote
@@ -2141,7 +2221,7 @@ struct SpotUniverseItem {
     index: usize,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Token {
     name: String,
@@ -2194,7 +2274,7 @@ impl From<Token> for SpotToken {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct EvmContract {
     address: Address,
@@ -2310,6 +2390,46 @@ mod tests {
         let _fees = client.user_fees(user).await.unwrap();
     }
 
+    /// The undocumented info requests whose responses this SDK models rather than returning
+    /// as raw JSON. A shape change here is a deserialization failure, which the
+    /// `info_requests_are_still_answered` audit cannot see: it parses everything as
+    /// `serde_json::Value`.
+    #[tokio::test]
+    async fn test_http_undocumented_typed_responses() {
+        let client = hypercore::mainnet();
+        let user = address!("0xdfc24b077bc1425ad1dea75bcb6f8158e10df303");
+
+        let status = client.exchange_status().await.unwrap();
+        assert!(status.time > 0);
+
+        let _legal = client.legal_check(user).await.unwrap();
+        let _routing = client.usdc_routing().await.unwrap();
+        let _check = client.pre_transfer_check(user, user).await.unwrap();
+        let _vip = client.is_vip(user).await.unwrap();
+
+        let table = client.margin_table(50).await.unwrap();
+        assert!(!table.margin_tiers.is_empty());
+
+        let ntls = client.max_market_order_ntls().await.unwrap();
+        assert!(!ntls.is_empty());
+
+        let trades = client.recent_trades("BTC".to_string()).await.unwrap();
+        assert!(!trades.is_empty());
+
+        let ips = client.gossip_root_ips().await.unwrap();
+        assert!(!ips.is_empty());
+
+        let fundings = client.predicted_fundings().await.unwrap();
+        assert!(!fundings.is_empty());
+        // A coin absent from a venue comes back as null, which is why the venue payload is
+        // optional. Asserting one is present keeps the Option from being reverted.
+        assert!(
+            fundings
+                .iter()
+                .any(|(_, venues)| venues.iter().any(|(_, predicted)| predicted.is_none()))
+        );
+    }
+
     #[tokio::test]
     async fn test_http_all_mids() {
         let client = hypercore::mainnet();
@@ -2347,6 +2467,28 @@ mod tests {
 
         // Should have spot markets
         assert!(!spots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_http_delisted_markets() {
+        let exp = [
+            (0, "BTC", false),
+            (1, "ETH", false),
+            (3, "MATIC", true),
+            (5, "SOL", false),
+            (30, "MKR", true),
+            (66, "TON", true),
+        ];
+
+        let client = hypercore::mainnet();
+        let perps = client.perps().await.unwrap();
+
+        for (index, name, delisted) in exp {
+            let market = perps.get(index).unwrap();
+            assert_eq!(market.index, index);
+            assert_eq!(market.name, name);
+            assert_eq!(market.delisted, delisted);
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use alloy::sol;
 
 sol! {
+    #[derive(serde::Serialize)]
     struct Agent {
         string source;
         bytes32 connectionId;
@@ -37,6 +38,22 @@ sol! {
         uint64 nonce;
     }
 
+    /// Core to EVM transfer carrying a data payload for `ICoreReceiveWithData` contracts.
+    ///
+    /// EIP-712 type: `HyperliquidTransaction:SendToEvmWithData`.
+    struct SendToEvmWithData {
+        string hyperliquidChain;
+        string token;
+        string amount;
+        string sourceDex;
+        string destinationRecipient;
+        string addressEncoding;
+        uint32 destinationChainId;
+        uint64 gasLimit;
+        bytes data;
+        uint64 nonce;
+    }
+
     struct ApproveAgent {
         string hyperliquidChain;
         address agentAddress;
@@ -44,10 +61,6 @@ sol! {
         uint64 nonce;
     }
 
-    /// User-signed builder-fee cap.
-    ///
-    /// EIP-712 type: `HyperliquidTransaction:ApproveBuilderFee`.
-    /// `signatureChainId` is on the exchange action and is not part of this hash.
     struct ApproveBuilderFee {
         string hyperliquidChain;
         string maxFeeRate;
@@ -86,6 +99,57 @@ sol! {
         string hyperliquidChain;
         address user;
         string abstraction;
+        uint64 nonce;
+    }
+
+    /// User-signed portfolio margin toggle.
+    ///
+    /// EIP-712 type: `HyperliquidTransaction:UserPortfolioMargin`.
+    struct UserPortfolioMargin {
+        string hyperliquidChain;
+        address user;
+        bool enabled;
+        uint64 nonce;
+    }
+
+    /// User-signed link of a staking account to a trading account.
+    ///
+    /// EIP-712 type: `HyperliquidTransaction:LinkStakingUser`.
+    struct LinkStakingUser {
+        string hyperliquidChain;
+        address user;
+        bool isFinalize;
+        uint64 nonce;
+    }
+
+    /// User-signed removal of a trading account's staking link.
+    ///
+    /// EIP-712 type: `HyperliquidTransaction:StakingLinkDisableTradingUser`.
+    struct StakingLinkDisableTradingUser {
+        string hyperliquidChain;
+        address tradingUser;
+        uint64 nonce;
+    }
+
+    struct Withdraw3 {
+        string hyperliquidChain;
+        string destination;
+        string amount;
+        uint64 time;
+    }
+
+    struct UsdClassTransfer {
+        string hyperliquidChain;
+        string amount;
+        bool toPerp;
+        uint64 nonce;
+    }
+
+    struct TokenDelegate {
+        string hyperliquidChain;
+        address validator;
+        uint64 wei;
+        bool isUndelegate;
         uint64 nonce;
     }
 }

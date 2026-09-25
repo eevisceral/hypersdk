@@ -1,32 +1,40 @@
 mod account;
+mod action;
 mod balances;
+mod earn;
 mod markets;
 mod morpho;
 mod multisig;
 mod orders;
 mod orders_list;
+mod outcome;
 mod positions;
 mod prio;
 mod send;
 mod subscribe;
 mod to_multisig;
+mod trezor;
+mod twap;
 mod utils;
 mod vault;
 
 use account::AccountCmd;
 use balances::BalanceCmd;
 use clap::{Args, Parser};
+use earn::EarnCmd;
 use hypersdk::hypercore::Chain;
 use markets::{DexesCmd, PerpsCmd, SpotCmd};
 use morpho::{MorphoApyCmd, MorphoPositionCmd, MorphoVaultApyCmd};
 use multisig::MultiSigCmd;
 use orders::OrderCmd;
 use orders_list::OrdersCmd;
+use outcome::OutcomeCmd;
 use positions::PositionsCmd;
 use prio::PrioCmd;
 use send::SendCmd;
 use subscribe::SubscribeCmd;
 use to_multisig::ToMultiSigCmd;
+use twap::TwapCmd;
 use vault::VaultCmd;
 
 /// Main CLI structure for hypecli - A command-line interface for Hyperliquid.
@@ -52,6 +60,9 @@ enum Command {
     Balance(BalanceCmd),
     /// List HIP-3 DEXes
     Dexes(DexesCmd),
+    /// Hyperliquid Earn: supply, withdraw, and query the borrow/lend reserve
+    #[command(subcommand)]
+    Earn(EarnCmd),
     /// List perpetual markets
     Perps(PerpsCmd),
     /// List spot markets
@@ -70,6 +81,9 @@ enum Command {
     /// Order management (place and cancel orders)
     #[command(subcommand)]
     Order(OrderCmd),
+    /// HIP-4 outcome token operations (split, merge, negate)
+    #[command(subcommand)]
+    Outcome(OutcomeCmd),
     /// Subscribe to real-time WebSocket data feeds
     #[command(subcommand)]
     Subscribe(SubscribeCmd),
@@ -86,6 +100,8 @@ enum Command {
     /// Gossip priority auction: query status or place a bid
     #[command(subcommand)]
     Prio(PrioCmd),
+    /// Execute a stealth TWAP as independent market orders
+    Twap(TwapCmd),
 }
 
 impl Command {
@@ -94,6 +110,7 @@ impl Command {
             Self::Account(cmd) => cmd.run().await,
             Self::Balance(cmd) => cmd.run().await,
             Self::Dexes(cmd) => cmd.run().await,
+            Self::Earn(cmd) => cmd.run().await,
             Self::Perps(cmd) => cmd.run().await,
             Self::Spot(cmd) => cmd.run().await,
             Self::MorphoPosition(cmd) => cmd.run().await,
@@ -102,31 +119,33 @@ impl Command {
             Self::Multisig(cmd) => cmd.run().await,
             Self::ToMultisig(cmd) => cmd.run().await,
             Self::Order(cmd) => cmd.run().await,
+            Self::Outcome(cmd) => cmd.run().await,
             Self::Subscribe(cmd) => cmd.run().await,
             Self::Send(cmd) => cmd.run().await,
             Self::Vault(cmd) => cmd.run().await,
             Self::Positions(cmd) => cmd.run().await,
             Self::Orders(cmd) => cmd.run().await,
             Self::Prio(cmd) => cmd.run().await,
+            Self::Twap(cmd) => cmd.run().await,
         }
     }
 }
 
-/// Common arguments for multi-signature commands.
-///
-/// These arguments are shared across all multi-sig operations to specify
-/// the signer credentials and target multi-sig wallet.
+/// Signer credentials and target chain, shared by signed commands.
 #[derive(Args)]
 pub struct SignerArgs {
-    /// Private key for signing (hex format).
-    #[arg(long)]
+    /// Private key for signing (hex format). Agent (API wallet) keys work
+    /// for L1 actions such as orders and outcome operations.
+    #[arg(long, conflicts_with_all = ["trezor_path", "trezor_index"])]
     pub private_key: Option<String>,
     /// Foundry keystore.
-    #[arg(long, env = "HYPECLI_KEYSTORE")]
+    #[arg(long, env = "HYPECLI_KEYSTORE", conflicts_with_all = ["trezor_path", "trezor_index"])]
     pub keystore: Option<String>,
     /// Keystore password. Otherwise it'll be prompted.
     #[arg(long, env = "HYPECLI_PASSWORD")]
     pub password: Option<String>,
+    #[command(flatten)]
+    pub trezor: trezor::TrezorArgs,
     /// Target chain for the operation.
     #[arg(long, default_value = "mainnet")]
     pub chain: Chain,
@@ -174,9 +193,17 @@ Commands that modify state (orders, transfers, etc.) require authentication via 
   --private-key <HEX>   Direct private key (with or without 0x prefix)
   --keystore <NAME>     Foundry keystore name (located in ~/.foundry/keystores/)
   --password <PASS>     Keystore password (prompted if not provided)
+  --trezor-index <N>    Select Trezor address m/44'/60'/0'/0/N directly
+  --trezor-path <PATH>  Select a full Trezor derivation path directly
+  --trezor-scan-limit <N>  Search N addresses locally from a Trezor xpub (default: 10)
 
-Note: Ledger hardware wallets are supported for multi-sig operations but NOT for
-order placement/cancellation (which require synchronous signing).
+Orders, sends, Earn, vault transfers, outcome operations, and priority bids support Ledger
+and Trezor. Add --multi-sig-addr <ADDRESS> for multisig and --local to require local signers.
+Automated TWAP requires a private key or keystore for continuous signing.
+
+Agent (API wallet) private keys are accepted for L1 actions (orders, TWAP, vault transfers,
+outcome operations); the exchange attributes the action to the master account. User-signed
+actions (sends, approvals) still require the master key.
 
 ASSET NAME FORMATS
 ------------------
@@ -339,6 +366,53 @@ Cancel Order (by OID or CLOID):
     --oid <NUMBER>    Exchange-assigned order ID (use this OR --cloid)
     --cloid <HEX>     Client-assigned order ID, 32 hex chars (use this OR --oid)
 
+OUTCOME COMMANDS (HIP-4)
+------------------------
+
+Outcome markets are fully collateralized binary contracts. The quote token can be
+split into one share of each side of an outcome, and matching shares can be merged
+back. Outcome and question IDs come from `hypecli outcome list`.
+
+List Outcomes and Questions:
+  hypecli outcome list
+  hypecli outcome list --chain testnet
+
+Split Quote Token into Outcome Shares:
+  hypecli outcome split \
+    --chain mainnet \
+    --private-key <HEX> \
+    --outcome 12 \
+    --amount 100
+
+Merge Outcome Shares Back into the Quote Token:
+  hypecli outcome merge \
+    --chain mainnet \
+    --private-key <HEX> \
+    --outcome 12 \
+    --amount 100
+
+  Omit --amount to merge the maximum available.
+
+Merge a Question's Full Outcome Set:
+  hypecli outcome merge-question \
+    --chain mainnet \
+    --private-key <HEX> \
+    --question 3
+
+  Merges a full set of mutually-exclusive outcomes within a question back into
+  the quote token. Omit --amount to merge the maximum available.
+
+Negate an Outcome within a Question:
+  hypecli outcome negate \
+    --chain mainnet \
+    --private-key <HEX> \
+    --question 3 \
+    --outcome 12 \
+    --amount 50
+
+  Converts shares of one outcome into the complementary basket (the "No" of
+  that outcome) within a categorical question.
+
 MULTI-SIG COMMANDS
 ------------------
 
@@ -357,13 +431,17 @@ Multi-Sig Sign (participates via P2P gossip network):
     --multi-sig-addr <MULTISIG_ADDRESS>
 
 Multi-Sig Send Asset:
-  hypecli multisig send-asset \
+  hypecli send \
     --chain mainnet \
     --private-key <HEX> \
     --multi-sig-addr <MULTISIG_ADDRESS> \
     --destination <RECIPIENT> \
     --token <TOKEN_NAME> \
     --amount <AMOUNT>
+
+  Add --local to require all signatures locally. Use --from and --to to select
+  balances or DEXes. Omit --destination for transfers within the multisig account.
+  The older `hypecli multisig send-asset` command remains supported.
 
 Multi-Sig Update Configuration:
   hypecli multisig update \
@@ -574,6 +652,45 @@ Withdraw USDC from a vault:
     --vault <ADDRESS>    Vault address to deposit into or withdraw from
     --amount <DECIMAL>   Amount of USDC
 
+EARN COMMANDS (Borrow/Lend Reserve)
+-----------------------------------
+
+Select an Earn reserve with --token USDC or --token USDT0. The default is USDC.
+Symbols are case-insensitive, and numeric token indexes are also accepted.
+
+Supply USDC into the Earn reserve (omit --amount for the maximum available):
+  hypecli earn supply \
+    --chain mainnet \
+    --private-key <HEX> \
+    --amount 100
+
+Withdraw supplied USDC (omit --amount for the full position):
+  hypecli earn withdraw \
+    --chain mainnet \
+    --private-key <HEX> \
+    --amount 100
+
+Query reserve rates and your position:
+  hypecli earn status --user <ADDRESS>
+
+Supply USDC from a multisig account:
+  hypecli earn supply \
+    --multi-sig-addr <MULTISIG_ADDRESS> \
+    --keystore my-wallet \
+    --token USDC \
+    --amount 100
+
+Other signers join using the printed `hypecli multisig sign` command.
+Add --local to require all signatures locally. Withdraw supports the same flags.
+For multisig positions, pass the multisig address to `earn status --user`.
+
+  Arguments:
+    --amount <DECIMAL>   Amount to supply or withdraw (omit = max)
+    --token <SYMBOL_OR_INDEX>  Reserve token symbol or index (default USDC)
+    --user <ADDRESS>     User address for status
+    --multi-sig-addr <ADDRESS>  Multisig account for supply or withdraw
+    --local             Collect only local signatures (requires --multi-sig-addr)
+
 SUBSCRIBE COMMANDS (Real-time WebSocket Data)
 ---------------------------------------------
 
@@ -628,7 +745,7 @@ Workflow 8: Stream HIP3 DEX Candle Data as JSON
 ERROR HANDLING
 --------------
 Common error scenarios:
-  - "Order operations require a private key or keystore" - Ledger not supported for orders
+  - Automated TWAP requires --private-key or --keystore
   - "keystore doesn't exist" - Check ~/.foundry/keystores/ for available keystores
   - "CLOID must be exactly 16 bytes" - Ensure CLOID is 32 hex characters
   - "Perpetual market 'X' not found" - Use `hypecli perps` to list valid market names

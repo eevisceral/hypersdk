@@ -45,33 +45,43 @@ use std::{
 };
 
 use alloy::{
-    primitives::Address,
+    primitives::{Address, Bytes},
     signers::{Signer, SignerSync},
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::Deserialize;
 use url::Url;
 
-use super::{AssetTarget, signing::*};
+use super::{ApiError, AssetTarget, signing::*};
 use crate::hypercore::{
-    ActionError, ApiAgent, CandleInterval, Chain, Cloid, Dex, GossipPriorityAuctionStatus, Market,
-    MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, Signature, SpotMarket, SpotToken,
+    ActionError, ApiAgent, Builder, CandleInterval, Chain, Cloid, Dex, GossipPriorityAuctionStatus,
+    Market, MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, Signature, SpotMarket, SpotToken,
     api::{
-        Action, ActionRequest, ApproveAgent, ApproveBuilderFee, ConvertToMultiSigUser,
-        GossipPriorityBid, NegateOutcomeAction, OkResponse, OutcomeAmountAction,
-        QuestionAmountAction, Response, SignersConfig, TwapOrderAction, UpdateLeverage,
-        VaultTransfer,
+        Action, ActionRequest, AddressEncoding, ApproveAgent, ApproveBuilderFee, Aqav2Role,
+        AuthorizeAqav2Role, BorrowLendAction, CSignerAction, CValidatorAction,
+        ConvertToMultiSigUser, CreateVault, FinalizeEvmContract, FinalizeEvmContractInput,
+        GossipPriorityBid, Hip3LiquidatorTransferAction, LinkStakingUserAction, ModifyAction,
+        OkResponse, Response, SendToEvmWithDataAction, SignersConfig, SpotUserAction,
+        StakingLinkDisableTradingUserAction, SubAccountModify, SubAccountSpotTransfer,
+        SubAccountTransfer, ToggleSpotDusting, TokenDelegateAction, TopUpIsolatedOnlyMargin,
+        TwapOrderParams, UpdateIsolatedMargin, UpdateLeverage, UsdClassTransferAction,
+        UserOutcomeAction, UserPortfolioMarginAction, ValidatorL1Stream, VaultDistribute,
+        VaultModify, VaultTransfer, Withdraw3Action,
     },
+    deploy::{ActivateOutcomeDeployer, OutcomeDeployAction, PerpDeployAction, SpotDeployAction},
     mainnet_url, testnet_url,
     types::{
-        AbstractionMode, AgentSendAsset, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify,
-        BatchOrder, ClearinghouseState, Fill, FundingRate, InfoRequest, OrderGrouping,
-        OrderRequest, OrderResponseStatus, OrderTypePlacement, OrderUpdate, ScheduleCancel,
-        SendAsset, SendToken, SpotSend, SubAccount, TimeInForce, UsdSend, UserBalance, UserFees,
-        UserRole, UserSetAbstractionAction, UserVaultEquity, VaultDetails,
+        AbstractionMode, ActiveAssetData, AgentSendAsset, BasicOrder, BatchCancel,
+        BatchCancelCloid, BatchModify, BatchOrder, ClearinghouseState, Delegation,
+        DelegatorSummary, DeployAuctionStatus, ExchangeStatus, Fill, FundingRate, InfoRequest,
+        L2Book, LegalCheck, MarginTable, OrderGrouping, OrderRequest, OrderResponseStatus,
+        OrderTypePlacement, OrderUpdate, PerpDexLimits, PerpDexStatus, PreTransferCheck,
+        PredictedFundingVenue, ScheduleCancel, SendAsset, SendToken, SpotSend, SubAccount,
+        TimeInForce, TokenDetails, Trade, TwapSliceFill, UsdSend, UsdcRouting, UserBalance,
+        UserFees, UserFundingEntry, UserRateLimit, UserRole, UserSetAbstractionAction,
+        UserVaultEquity, VaultDetails,
     },
 };
 
@@ -96,6 +106,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub(crate) fn request_parts(&self) -> (Url, reqwest::Client) {
+        (self.base_url.clone(), self.http_client.clone())
+    }
+
     /// Creates a new HTTP client for the specified chain.
     ///
     /// The base URL is automatically determined based on the chain:
@@ -137,6 +151,17 @@ impl Client {
         }
     }
 
+    /// Same as [`Self::new`] with a caller-chosen request timeout.
+    pub fn with_request_timeout(chain: Chain, timeout: Duration) -> Self {
+        let mut client = Self::new(chain);
+        client.http_client = reqwest::Client::builder()
+            .timeout(timeout)
+            .tcp_nodelay(true)
+            .build()
+            .expect("reqwest client");
+        client
+    }
+
     /// Sets a custom base URL for this client.
     ///
     /// This is useful when connecting to a custom Hyperliquid node or proxy.
@@ -166,21 +191,6 @@ impl Client {
             http_client,
             ..self
         }
-    }
-
-    /// Clone the base URL and HTTP client for standalone `/info` helpers.
-    pub(crate) fn request_parts(&self) -> (Url, reqwest::Client) {
-        (self.base_url.clone(), self.http_client.clone())
-    }
-
-    /// Same as [`Self::new`] with a custom per-request timeout.
-    pub fn with_request_timeout(chain: Chain, timeout: Duration) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(timeout)
-            .tcp_nodelay(true)
-            .build()
-            .expect("reqwest client");
-        Self::new(chain).with_http_client(http_client)
     }
 
     /// Returns the chain this client is configured for.
@@ -394,107 +404,6 @@ impl Client {
         super::outcomes(self.base_url.clone(), self.http_client.clone()).await
     }
 
-    /// Settlement record for a resolved outcome (`null` when unsettled).
-    #[inline(always)]
-    pub async fn settled_outcome(&self, outcome_id: u32) -> Result<Option<super::SettledOutcome>> {
-        super::settled_outcome(self.base_url.clone(), self.http_client.clone(), outcome_id).await
-    }
-
-    /// Split quote into Yes + No shares for an outcome.
-    pub async fn split_outcome<S: Signer + Send + Sync>(
-        &self,
-        signer: &S,
-        outcome_id: u32,
-        amount: Option<&str>,
-        nonce: u64,
-        vault_address: Option<Address>,
-        expires_after: Option<DateTime<Utc>>,
-    ) -> Result<Response> {
-        let action = Action::UserOutcome {
-            split_outcome: Some(OutcomeAmountAction {
-                outcome: outcome_id,
-                amount: amount.map(str::to_string),
-            }),
-            merge_outcome: None,
-            merge_question: None,
-            negate_outcome: None,
-        };
-        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
-            .await
-    }
-
-    /// Merge Yes + No shares into quote for an outcome.
-    pub async fn merge_outcome<S: Signer + Send + Sync>(
-        &self,
-        signer: &S,
-        outcome_id: u32,
-        amount: Option<&str>,
-        nonce: u64,
-        vault_address: Option<Address>,
-        expires_after: Option<DateTime<Utc>>,
-    ) -> Result<Response> {
-        let action = Action::UserOutcome {
-            split_outcome: None,
-            merge_outcome: Some(OutcomeAmountAction {
-                outcome: outcome_id,
-                amount: amount.map(str::to_string),
-            }),
-            merge_question: None,
-            negate_outcome: None,
-        };
-        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
-            .await
-    }
-
-    /// Merge all legs of a categorical question.
-    pub async fn merge_question<S: Signer + Send + Sync>(
-        &self,
-        signer: &S,
-        question_id: u32,
-        amount: Option<&str>,
-        nonce: u64,
-        vault_address: Option<Address>,
-        expires_after: Option<DateTime<Utc>>,
-    ) -> Result<Response> {
-        let action = Action::UserOutcome {
-            split_outcome: None,
-            merge_outcome: None,
-            merge_question: Some(QuestionAmountAction {
-                question: question_id,
-                amount: amount.map(str::to_string),
-            }),
-            negate_outcome: None,
-        };
-        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
-            .await
-    }
-
-    /// Convert No on one outcome into Yes on sibling outcomes in a question.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn negate_outcome<S: Signer + Send + Sync>(
-        &self,
-        signer: &S,
-        question_id: u32,
-        outcome_id: u32,
-        amount: &str,
-        nonce: u64,
-        vault_address: Option<Address>,
-        expires_after: Option<DateTime<Utc>>,
-    ) -> Result<Response> {
-        let action = Action::UserOutcome {
-            split_outcome: None,
-            merge_outcome: None,
-            merge_question: None,
-            negate_outcome: Some(NegateOutcomeAction {
-                question: question_id,
-                outcome: outcome_id,
-                amount: amount.to_string(),
-            }),
-        };
-        self.sign_and_send(signer, action, nonce, vault_address, expires_after)
-            .await
-    }
-
     /// Send an info request to `/info` and deserialize the JSON response.
     ///
     /// Private helper that encapsulates the repeated HTTP send → check status →
@@ -502,7 +411,11 @@ impl Client {
     ///
     /// The `label` parameter is included in error messages for debugging — it should
     /// identify the calling endpoint (e.g., `"open_orders"`, `"user_balances"`).
-    async fn send_info_request<R>(&self, label: &str, req: &impl serde::Serialize) -> Result<R>
+    pub(crate) async fn send_info_request<R>(
+        &self,
+        label: &str,
+        req: &impl serde::Serialize,
+    ) -> Result<R>
     where
         R: for<'de> Deserialize<'de>,
     {
@@ -516,11 +429,10 @@ impl Client {
             let text = String::from_utf8_lossy(&bytes);
 
             if !status.is_success() {
-                return Err(anyhow!("[{label}] HTTP {status} body={text}"));
+                return Err(ApiError(format!("[{label}] HTTP {status} body={text}")).into());
             }
 
-            serde_json::from_str(&text)
-                .map_err(|e| anyhow!("[{label}] decode failed: {e}; body={text}"))
+            serde_json::from_str(&text).with_context(|| format!("[{label}] body={text}"))
         })
         .await
     }
@@ -583,7 +495,7 @@ impl Client {
     /// Retrieves historical orders for a user.
     ///
     /// Returns all past (non-open) orders, including filled, canceled, and expired orders.
-    pub async fn historical_orders(&self, user: Address) -> Result<Vec<BasicOrder>> {
+    pub async fn historical_orders(&self, user: Address) -> Result<Vec<OrderUpdate<BasicOrder>>> {
         let req = InfoRequest::HistoricalOrders { user };
         self.send_info_request("historical_orders", &req).await
     }
@@ -593,7 +505,10 @@ impl Client {
     /// Retrieves all trade fills (executed orders) for a user, including the fill price, size,
     /// side, and associated order ID.
     pub async fn user_fills(&self, user: Address) -> Result<Vec<Fill>> {
-        let req = InfoRequest::UserFills { user };
+        let req = InfoRequest::UserFills {
+            user,
+            aggregate_by_time: None,
+        };
         self.send_info_request("user_fills", &req).await
     }
 
@@ -617,6 +532,7 @@ impl Client {
             user,
             start_time,
             end_time,
+            aggregate_by_time: None,
         };
         self.send_info_request("user_fills_by_time", &req).await
     }
@@ -746,7 +662,8 @@ impl Client {
 
     /// Retrieves user-specific fee rates.
     ///
-    /// Returns effective maker and taker rates plus the active referral discount.
+    /// Returns effective maker/taker rates for perps and spot, referral discount,
+    /// daily volume, and staking discount information.
     ///
     /// # Example
     ///
@@ -762,7 +679,7 @@ impl Client {
     /// println!("maker={} taker={} referral_discount={}",
     ///     fees.maker_rate,
     ///     fees.taker_rate,
-    ///     fees.referral_discount
+    ///     fees.active_referral_discount
     /// );
     /// # Ok(())
     /// # }
@@ -871,47 +788,6 @@ impl Client {
             end_time,
         };
         self.send_info_request("funding_history", &req).await
-    }
-
-    /// Perp metadata plus one [`AssetContext`](super::types::AssetContext) per universe row.
-    ///
-    /// POST `/info` with `type: "metaAndAssetCtxs"`. Response is a JSON array `[meta, assetCtxs]`.
-    pub async fn meta_and_asset_ctxs(
-        &self,
-        dex: Option<String>,
-    ) -> Result<super::types::MetaAndAssetCtxsResponse> {
-        let req = InfoRequest::MetaAndAssetCtxs { dex };
-        self.send_info_request("meta_and_asset_ctxs", &req).await
-    }
-
-    /// User leverage and trade-size limits for a perp coin (works without open position).
-    ///
-    /// POST `/info` with `type: "activeAssetData"`.
-    pub async fn active_asset_data(
-        &self,
-        user: Address,
-        coin: impl Into<String>,
-    ) -> Result<super::types::ActiveAssetData> {
-        let req = InfoRequest::ActiveAssetData {
-            user,
-            coin: coin.into(),
-        };
-        self.send_info_request("active_asset_data", &req).await
-    }
-
-    /// L2 order book snapshot (at most **20 levels per side** per API docs).
-    pub async fn l2_book_info(
-        &self,
-        coin: impl Into<String>,
-        n_sig_figs: Option<u8>,
-        mantissa: Option<u8>,
-    ) -> Result<super::types::L2Book> {
-        let req = InfoRequest::L2BookInfo {
-            coin: coin.into(),
-            n_sig_figs,
-            mantissa,
-        };
-        self.send_info_request("l2_book_info", &req).await
     }
 
     /// Retrieves the multi-signature wallet configuration for a user.
@@ -1096,31 +972,6 @@ impl Client {
         self.send_info_request("user_role", &req).await
     }
 
-    /// Approved builder fee for `user` toward `builder`, in tenths of a basis point.
-    ///
-    /// `0` means the main wallet has not approved this builder. The info response is a bare number.
-    ///
-    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes>
-    pub async fn max_builder_fee(&self, user: Address, builder: Address) -> Result<u64> {
-        let req = InfoRequest::MaxBuilderFee { user, builder };
-        self.send_info_request("max_builder_fee", &req).await
-    }
-
-    /// Builder addresses `user` has approved. An empty list means none.
-    pub async fn approved_builders(&self, user: Address) -> Result<Vec<Address>> {
-        let req = InfoRequest::ApprovedBuilders { user };
-        self.send_info_request("approved_builders", &req).await
-    }
-
-    /// Referral and builder reward balances for `user`.
-    pub async fn referral_rewards(
-        &self,
-        user: Address,
-    ) -> Result<crate::hypercore::types::ReferralRewards> {
-        let req = InfoRequest::Referral { user };
-        self.send_info_request("referral", &req).await
-    }
-
     /// Retrieve a user's subaccounts.
     ///
     /// Returns all subaccounts associated with a master account, including their
@@ -1244,13 +1095,7 @@ impl Client {
             )
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("schedule_cancel: {err}")
-            }
-            _ => anyhow::bail!("schedule_cancel: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Places a batch of orders.
@@ -1310,27 +1155,6 @@ impl Client {
         }
     }
 
-    /// Place a native Hyperliquid TWAP (`twapOrder`). Duration 5–1440 minutes; ~$100 min notional.
-    pub fn twap_order<S: SignerSync>(
-        &self,
-        signer: &S,
-        twap: TwapOrderAction,
-        nonce: u64,
-        vault_address: Option<Address>,
-        expires_after: Option<DateTime<Utc>>,
-    ) -> impl Future<Output = Result<serde_json::Value, anyhow::Error>> + Send + 'static {
-        let future = self.sign_and_send_sync(signer, twap, nonce, vault_address, expires_after);
-        async move {
-            let resp = future.await?;
-            match resp {
-                Response::Ok(OkResponse::TwapOrder { status }) => Ok(status),
-                Response::Ok(OkResponse::Default) => Ok(serde_json::json!({"ok": true})),
-                Response::Err(err) => anyhow::bail!("{err}"),
-                other => anyhow::bail!("unexpected twap response: {other:?}"),
-            }
-        }
-    }
-
     /// Place a market buy or sell order for any tradeable market.
     ///
     /// Uses Hyperliquid's native [`TimeInForce::FrontendMarket`] order type, which
@@ -1363,7 +1187,7 @@ impl Client {
     ///
     /// // Market buy 0.01 ETH, accepting fills up to 3500 USDC
     /// let statuses = client
-    ///     .market_open(&signer, eth, true, rust_decimal::dec!(3500), rust_decimal::dec!(0.01), nonce_handler.next(), None, None)
+    ///     .market_open(&signer, eth, true, rust_decimal::dec!(3500), rust_decimal::dec!(0.01), nonce_handler.next(), None, None, None)
     ///     .await?;
     ///
     /// for status in &statuses {
@@ -1383,6 +1207,7 @@ impl Client {
         nonce: u64,
         vault_address: Option<Address>,
         expires_after: Option<DateTime<Utc>>,
+        builder: Option<Builder>,
     ) -> Result<Vec<OrderResponseStatus>> {
         let batch = BatchOrder {
             orders: vec![OrderRequest {
@@ -1392,17 +1217,17 @@ impl Client {
                 sz: size,
                 reduce_only: false,
                 order_type: OrderTypePlacement::Limit {
-                    tif: TimeInForce::Gtc,
+                    tif: TimeInForce::FrontendMarket,
                 },
                 cloid: Default::default(),
             }],
             grouping: OrderGrouping::Na,
-            builder: None,
+            builder,
         };
 
-        self.place(signer, batch, nonce, vault_address, expires_after)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))
+        Ok(self
+            .place(signer, batch, nonce, vault_address, expires_after)
+            .await?)
     }
 
     /// Cancel a batch of orders by exchange-assigned order ID (OID).
@@ -1563,20 +1388,17 @@ impl Client {
         let resp = self
             .sign_and_send(signer, approve_agent, nonce, None, None)
             .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("approve_agent: {err}")
-            }
-            _ => anyhow::bail!("approve_agent: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
-    /// Approve a maximum builder fee. The signer must be the user's main wallet.
+    /// Approve the maximum fee rate a builder can charge for routed orders.
     ///
-    /// `max_fee_rate` is a percent string such as `"0.01%"` (1 bp). Perps cap at `0.1%`.
+    /// # Parameters
     ///
-    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#approve-a-builder-fee>
+    /// - `signer`: The wallet signing the approval
+    /// - `builder`: Builder address
+    /// - `max_fee_rate`: Max fee as percent string (e.g. `"0.001%"`)
+    /// - `nonce`: The nonce for this action
     pub async fn approve_builder_fee<S: Signer + Send + Sync>(
         &self,
         signer: &S,
@@ -1584,41 +1406,18 @@ impl Client {
         max_fee_rate: String,
         nonce: u64,
     ) -> Result<()> {
-        let action = ApproveBuilderFee {
+        let approve_builder_fee = ApproveBuilderFee {
             signature_chain_id: self.chain.arbitrum_id().to_owned(),
             hyperliquid_chain: self.chain,
             max_fee_rate,
             builder,
             nonce,
         };
-        let resp = self
-            .sign_and_send(signer, action, nonce, None, None)
-            .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("approve_builder_fee: {err}"),
-            _ => anyhow::bail!("approve_builder_fee: unexpected response type: {resp:?}"),
-        }
-    }
 
-    /// Claim referral and builder rewards for the signing account.
-    ///
-    /// L1-signed. The exchange docs show the action as `{ "type": "claimRewards" }`.
-    /// Referral rewards claim once the unclaimed amount is greater than $1.
-    pub async fn claim_rewards<S: Signer + Send + Sync>(
-        &self,
-        signer: &S,
-        nonce: u64,
-        vault_address: Option<Address>,
-    ) -> Result<()> {
         let resp = self
-            .sign_and_send(signer, Action::ClaimRewards, nonce, vault_address, None)
+            .sign_and_send(signer, approve_builder_fee, nonce, None, None)
             .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("claim_rewards: {err}"),
-            _ => anyhow::bail!("claim_rewards: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Convert account to multi-signature user.
@@ -1680,13 +1479,7 @@ impl Client {
         let resp = self
             .sign_and_send(signer, convert, nonce, None, None)
             .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("convert_to_multisig: {err}")
-            }
-            _ => anyhow::bail!("convert_to_multisig: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Helper function to transfer from spot Core balance to HyperEVM.
@@ -1709,7 +1502,7 @@ impl Client {
     ) -> Result<()> {
         let destination = token
             .cross_chain_address
-            .ok_or_else(|| anyhow::anyhow!("token {token} doesn't have a cross chain address"))?;
+            .ok_or_else(|| anyhow!("token {token} doesn't have a cross chain address"))?;
 
         self.spot_send(
             &signer,
@@ -1743,7 +1536,7 @@ impl Client {
         nonce: u64,
     ) -> Result<()> {
         if token.name != "USDC" {
-            return Err(anyhow::anyhow!(
+            return Err(anyhow!(
                 "only USDC is accepted, tried to transfer {}",
                 token.name
             ));
@@ -1784,7 +1577,7 @@ impl Client {
         nonce: u64,
     ) -> Result<()> {
         if token.name != "USDC" {
-            return Err(anyhow::anyhow!(
+            return Err(anyhow!(
                 "only USDC is accepted, tried to transfer {}",
                 token.name
             ));
@@ -1828,13 +1621,7 @@ impl Client {
         let resp = self
             .sign_and_send_sync(signer, send.into_action(self.chain), nonce, None, None)
             .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("send_usdc: {err}")
-            }
-            _ => anyhow::bail!("send_usdc: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Deposit or withdraw USDC from a vault.
@@ -1858,7 +1645,7 @@ impl Client {
     ) -> Result<()> {
         let usd_raw = (usd * rust_decimal::Decimal::from(1_000_000))
             .to_u64()
-            .ok_or_else(|| anyhow::anyhow!("vault_transfer: usd amount out of range: {usd}"))?;
+            .ok_or_else(|| anyhow!("vault_transfer: usd amount out of range: {usd}"))?;
         let action = VaultTransfer {
             vault_address,
             is_deposit,
@@ -1867,11 +1654,7 @@ impl Client {
         let resp = self
             .sign_and_send_sync(signer, action, nonce, None, None)
             .await?;
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("vault_transfer: {err}"),
-            _ => anyhow::bail!("vault_transfer: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Send USDC between spot and DEX/subaccount balances.
@@ -1895,16 +1678,7 @@ impl Client {
         let future =
             self.sign_and_send_sync(signer, send.into_action(self.chain), nonce, None, None);
 
-        async move {
-            let resp = future.await?;
-            match resp {
-                Response::Ok(OkResponse::Default) => Ok(()),
-                Response::Err(err) => {
-                    anyhow::bail!("send_asset: {err}")
-                }
-                _ => anyhow::bail!("send_asset: unexpected response type: {resp:?}"),
-            }
-        }
+        async move { future.await?.into_default() }
     }
 
     /// Agent-signed send asset.
@@ -1923,16 +1697,7 @@ impl Client {
     ) -> impl Future<Output = Result<()>> + Send + 'static {
         let future = self.sign_and_send_sync(signer, send.into_action(), nonce, None, None);
 
-        async move {
-            let resp = future.await?;
-            match resp {
-                Response::Ok(OkResponse::Default) => Ok(()),
-                Response::Err(err) => {
-                    anyhow::bail!("agent_send_asset: {err}")
-                }
-                _ => anyhow::bail!("agent_send_asset: unexpected response type: {resp:?}"),
-            }
-        }
+        async move { future.await?.into_default() }
     }
 
     /// Send a spot token to another address (spot-to-spot transfer).
@@ -1956,16 +1721,7 @@ impl Client {
         let future =
             self.sign_and_send_sync(signer, send.into_action(self.chain), nonce, None, None);
 
-        async move {
-            let resp = future.await?;
-            match resp {
-                Response::Ok(OkResponse::Default) => Ok(()),
-                Response::Err(err) => {
-                    anyhow::bail!("spot send: {err}")
-                }
-                _ => anyhow::bail!("spot_send: unexpected response type: {resp:?}"),
-            }
-        }
+        async move { future.await?.into_default() }
     }
 
     /// Update leverage for a perpetual asset.
@@ -2021,13 +1777,35 @@ impl Client {
             )
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("update_leverage: {err}")
-            }
-            _ => anyhow::bail!("update_leverage: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
+    }
+
+    /// Updates isolated margin for a position.
+    pub async fn update_isolated_margin<S: SignerSync>(
+        &self,
+        signer: &S,
+        asset: usize,
+        is_buy: bool,
+        ntli: u64,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let resp = self
+            .sign_and_send_sync(
+                signer,
+                Action::UpdateIsolatedMargin(UpdateIsolatedMargin {
+                    asset,
+                    is_buy,
+                    ntli,
+                }),
+                nonce,
+                vault_address,
+                expires_after,
+            )
+            .await?;
+
+        resp.into_default()
     }
 
     /// Toggle the EVM user "big blocks" setting via signed action.
@@ -2061,13 +1839,7 @@ impl Client {
             )
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("evm_user_modify: {err}")
-            }
-            _ => anyhow::bail!("evm_user_modify: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Invalidate a nonce by sending a no-op action.
@@ -2093,22 +1865,44 @@ impl Client {
             .sign_and_send_sync(signer, Action::Noop, nonce, vault_address, expires_after)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => {
-                anyhow::bail!("noop: {err}")
-            }
-            _ => anyhow::bail!("noop: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     // -----------------------------------------------------------------
     // Account Abstraction Mode actions
     // -----------------------------------------------------------------
 
+    /// Query the maximum builder fee approved by a user for a specific builder.
+    ///
+    /// Returns the maximum fee approved by `user` for `builder`,
+    /// expressed in tenths of a basis point (e.g. `1` means 0.001%).
+    /// Returns `0` if no approval has been granted.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use hypersdk::hypercore;
+    /// use hypersdk::Address;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let client = hypercore::mainnet();
+    /// let user: Address = "0x...".parse()?;
+    /// let builder: Address = "0x...".parse()?;
+    /// let max_fee = client.max_builder_fee(user, builder).await?;
+    /// println!("Max approved fee: {} (tenths of a bps)", max_fee);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#check-builder-fee-approval>
+    pub async fn max_builder_fee(&self, user: Address, builder: Address) -> Result<u32> {
+        let req = InfoRequest::MaxBuilderFee { user, builder };
+        self.send_info_request("max_builder_fee", &req).await
+    }
+
     /// Query the current account abstraction mode for a user.
     ///
-    /// Sends an info request to `/info` with type `"userAbstraction"`.
+    /// Sends an info request to `/info` with type `"abstraction"`.
     /// Returns the current mode as parsed by [`AbstractionMode`].
     ///
     /// # Example
@@ -2127,11 +1921,23 @@ impl Client {
     ///
     /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#retrieve-abstraction-mode>
     pub async fn abstraction_mode(&self, user: Address) -> Result<AbstractionMode> {
-        let req = InfoRequest::AbstractionMode { user };
+        let req = InfoRequest::UserAbstraction { user };
         // Response is a plain string like "unifiedAccount" or "disabled"
-        let s: String = self.send_info_request("abstraction_mode", &req).await?;
+        let s: String = self
+            .send_info_request("user_abstraction_mode", &req)
+            .await?;
         AbstractionMode::from_api_str(&s)
-            .map_err(|e| anyhow!("failed to parse abstraction mode: {e}"))
+            .map_err(|e| anyhow!("failed to parse user abstraction mode: {e}"))
+    }
+
+    /// Query whether HIP-3 DEX abstraction is enabled for a user.
+    ///
+    /// Returns `None` when the user has never set it, which the API reports as `null`.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#query-a-users-hip-3-dex-abstraction-state>
+    pub async fn user_dex_abstraction(&self, user: Address) -> Result<Option<bool>> {
+        let req = InfoRequest::UserDexAbstraction { user };
+        self.send_info_request("user_dex_abstraction", &req).await
     }
 
     /// Set abstraction mode via agent-signed action (L1/RMP signing).
@@ -2171,11 +1977,7 @@ impl Client {
             .sign_and_send_sync(signer, action, nonce, vault_address, expires_after)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("agent_set_abstraction: {err}"),
-            _ => anyhow::bail!("agent_set_abstraction: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Set abstraction mode via user-signed action (EIP-712 signing).
@@ -2221,11 +2023,7 @@ impl Client {
             )
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("user_set_abstraction: {err}"),
-            _ => anyhow::bail!("user_set_abstraction: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Executes a multisig action on Hyperliquid.
@@ -2322,11 +2120,10 @@ impl Client {
             let text = String::from_utf8_lossy(&bytes);
 
             if !status.is_success() {
-                return Err(anyhow!("HTTP {status} body={text}"));
+                return Err(ApiError(format!("HTTP {status} body={text}")).into());
             }
 
-            let parsed = serde_json::from_str(&text)
-                .map_err(|e| anyhow!("decode failed: {e}; body={text}"))?;
+            let parsed = serde_json::from_str(&text).with_context(|| format!("body={text}"))?;
 
             Ok(parsed)
         }
@@ -2375,16 +2172,1199 @@ impl Client {
         let text = String::from_utf8_lossy(&bytes);
 
         if !status.is_success() {
-            return Err(anyhow!("HTTP {status} body={text}"));
+            return Err(ApiError(format!("HTTP {status} body={text}")).into());
         }
 
-        let parsed =
-            serde_json::from_str(&text).map_err(|e| anyhow!("decode failed: {e}; body={text}"))?;
+        let parsed = serde_json::from_str(&text).with_context(|| format!("body={text}"))?;
 
         Ok(parsed)
     }
 
-    // TODO: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#retrieve-a-users-subaccounts
+    /// Returns combined perpetual metadata and asset contexts.
+    pub async fn meta_and_asset_ctxs(
+        &self,
+        dex: Option<String>,
+    ) -> Result<super::types::MetaAndAssetCtxsResponse> {
+        let req = InfoRequest::MetaAndAssetCtxs { dex };
+        self.send_info_request("meta_and_asset_ctxs", &req).await
+    }
+
+    /// Returns combined spot metadata and asset contexts.
+    pub async fn spot_meta_and_asset_ctxs(&self) -> Result<serde_json::Value> {
+        let req = InfoRequest::SpotMetaAndAssetCtxs;
+        self.send_info_request("spot_meta_and_asset_ctxs", &req)
+            .await
+    }
+
+    /// Returns the user's rate limit usage.
+    pub async fn user_rate_limit(&self, user: Address) -> Result<UserRateLimit> {
+        let req = InfoRequest::UserRateLimit { user };
+        self.send_info_request("user_rate_limit", &req).await
+    }
+
+    /// Returns the user's funding history.
+    pub async fn user_funding(
+        &self,
+        user: Address,
+        start_time: u64,
+        end_time: Option<u64>,
+    ) -> Result<Vec<UserFundingEntry>> {
+        let req = InfoRequest::UserFunding {
+            user,
+            start_time,
+            end_time,
+        };
+        self.send_info_request("user_funding", &req).await
+    }
+
+    /// Returns the user's non-funding ledger updates.
+    pub async fn user_non_funding_ledger_updates(
+        &self,
+        user: Address,
+        start_time: u64,
+        end_time: Option<u64>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let req = InfoRequest::UserNonFundingLedgerUpdates {
+            user,
+            start_time,
+            end_time,
+        };
+        self.send_info_request("user_non_funding_ledger_updates", &req)
+            .await
+    }
+
+    /// Returns predicted funding rates for all coins, across every venue the exchange tracks.
+    ///
+    /// A venue's entry is `None` when the coin is not listed there, which is distinct from a
+    /// funding rate of zero. Treating `None` as zero invents a spread against the venues that
+    /// did report one.
+    pub async fn predicted_fundings(
+        &self,
+    ) -> Result<Vec<(String, Vec<(String, Option<PredictedFundingVenue>)>)>> {
+        let req = InfoRequest::PredictedFundings;
+        self.send_info_request("predicted_fundings", &req).await
+    }
+
+    /// Returns coins at open interest cap.
+    pub async fn perps_at_open_interest_cap(&self, dex: Option<String>) -> Result<Vec<String>> {
+        let req = InfoRequest::PerpsAtOpenInterestCap { dex };
+        self.send_info_request("perps_at_open_interest_cap", &req)
+            .await
+    }
+
+    /// Returns perp deploy auction status.
+    pub async fn perp_deploy_auction_status(&self) -> Result<DeployAuctionStatus> {
+        let req = InfoRequest::PerpDeployAuctionStatus;
+        self.send_info_request("perp_deploy_auction_status", &req)
+            .await
+    }
+
+    /// Returns user leverage and trade-size limits for a specific asset.
+    pub async fn active_asset_data(&self, user: Address, coin: String) -> Result<ActiveAssetData> {
+        let req = InfoRequest::ActiveAssetData { user, coin };
+        self.send_info_request("active_asset_data", &req).await
+    }
+
+    /// Returns OI caps and transfer limits for a HIP-3 DEX.
+    pub async fn perp_dex_limits(&self, dex: String) -> Result<PerpDexLimits> {
+        let req = InfoRequest::PerpDexLimits { dex };
+        self.send_info_request("perp_dex_limits", &req).await
+    }
+
+    /// Returns total net deposit for a HIP-3 DEX.
+    pub async fn perp_dex_status(&self, dex: String) -> Result<PerpDexStatus> {
+        let req = InfoRequest::PerpDexStatus { dex };
+        self.send_info_request("perp_dex_status", &req).await
+    }
+
+    /// Returns all DEXs' meta + asset contexts.
+    pub async fn all_perp_metas(&self) -> Result<serde_json::Value> {
+        let req = InfoRequest::AllPerpMetas;
+        self.send_info_request("all_perp_metas", &req).await
+    }
+
+    /// Returns category and description for a coin.
+    pub async fn perp_annotation(&self, coin: String) -> Result<serde_json::Value> {
+        let req = InfoRequest::PerpAnnotation { coin };
+        self.send_info_request("perp_annotation", &req).await
+    }
+
+    /// Returns all coin categories.
+    pub async fn perp_categories(&self) -> Result<Vec<(String, String)>> {
+        let req = InfoRequest::PerpCategories;
+        self.send_info_request("perp_categories", &req).await
+    }
+
+    /// Returns concise coin annotations.
+    pub async fn perp_concise_annotations(&self) -> Result<serde_json::Value> {
+        let req = InfoRequest::PerpConciseAnnotations;
+        self.send_info_request("perp_concise_annotations", &req)
+            .await
+    }
+
+    /// Returns spot token deploy state for a user.
+    pub async fn spot_deploy_state(&self, user: Address) -> Result<serde_json::Value> {
+        let req = InfoRequest::SpotDeployState { user };
+        self.send_info_request("spot_deploy_state", &req).await
+    }
+
+    /// Returns spot pair deploy auction status.
+    pub async fn spot_pair_deploy_auction_status(&self) -> Result<DeployAuctionStatus> {
+        let req = InfoRequest::SpotPairDeployAuctionStatus;
+        self.send_info_request("spot_pair_deploy_auction_status", &req)
+            .await
+    }
+
+    /// Returns detailed token info by tokenId.
+    pub async fn token_details(&self, token_id: String) -> Result<TokenDetails> {
+        let req = InfoRequest::TokenDetails { token_id };
+        self.send_info_request("token_details", &req).await
+    }
+
+    /// Returns settled outcome market result.
+    pub async fn settled_outcome(&self, outcome: u64) -> Result<serde_json::Value> {
+        let req = InfoRequest::SettledOutcome { outcome };
+        self.send_info_request("settled_outcome", &req).await
+    }
+
+    /// Returns user portfolio performance.
+    pub async fn portfolio(&self, user: Address) -> Result<serde_json::Value> {
+        let req = InfoRequest::Portfolio { user };
+        self.send_info_request("portfolio", &req).await
+    }
+
+    /// Returns referral state and rewards.
+    pub async fn referral(&self, user: Address) -> Result<serde_json::Value> {
+        let req = InfoRequest::Referral { user };
+        self.send_info_request("referral", &req).await
+    }
+
+    /// Returns list of approved builder addresses.
+    pub async fn approved_builders(&self, user: Address) -> Result<Vec<Address>> {
+        let req = InfoRequest::ApprovedBuilders { user };
+        self.send_info_request("approved_builders", &req).await
+    }
+
+    /// Returns user's staking delegations.
+    pub async fn delegations(&self, user: Address) -> Result<Vec<Delegation>> {
+        let req = InfoRequest::Delegations { user };
+        self.send_info_request("delegations", &req).await
+    }
+
+    /// Returns delegation summary for a user.
+    pub async fn delegator_summary(&self, user: Address) -> Result<DelegatorSummary> {
+        let req = InfoRequest::DelegatorSummary { user };
+        self.send_info_request("delegator_summary", &req).await
+    }
+
+    /// Returns delegation history for a user.
+    pub async fn delegator_history(&self, user: Address) -> Result<Vec<serde_json::Value>> {
+        let req = InfoRequest::DelegatorHistory { user };
+        self.send_info_request("delegator_history", &req).await
+    }
+
+    /// Returns delegation rewards for a user.
+    pub async fn delegator_rewards(&self, user: Address) -> Result<Vec<serde_json::Value>> {
+        let req = InfoRequest::DelegatorRewards { user };
+        self.send_info_request("delegator_rewards", &req).await
+    }
+
+    /// Returns borrow/lend user state.
+    pub async fn borrow_lend_user_state(&self, user: Address) -> Result<serde_json::Value> {
+        let req = InfoRequest::BorrowLendUserState { user };
+        self.send_info_request("borrow_lend_user_state", &req).await
+    }
+
+    /// Returns borrow/lend reserve state for a specific token.
+    pub async fn borrow_lend_reserve_state(&self, token: u32) -> Result<serde_json::Value> {
+        let req = InfoRequest::BorrowLendReserveState { token };
+        self.send_info_request("borrow_lend_reserve_state", &req)
+            .await
+    }
+
+    /// Returns all borrow/lend reserve states.
+    pub async fn all_borrow_lend_reserve_states(&self) -> Result<serde_json::Value> {
+        let req = InfoRequest::AllBorrowLendReserveStates;
+        self.send_info_request("all_borrow_lend_reserve_states", &req)
+            .await
+    }
+
+    /// Returns all HIP-4 outcome templates.
+    ///
+    /// Templates are voted on by validators and fix the display text, side names, and typed
+    /// keywords that outcome deployments are built from.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions#read-api>
+    pub async fn outcome_templates(&self) -> Result<serde_json::Value> {
+        let req = InfoRequest::OutcomeTemplates;
+        self.send_info_request("outcome_templates", &req).await
+    }
+
+    /// Returns TWAP slice fills for a user via info endpoint.
+    pub async fn user_twap_slice_fills(&self, user: Address) -> Result<Vec<TwapSliceFill>> {
+        let req = InfoRequest::UserTwapSliceFills { user };
+        self.send_info_request("user_twap_slice_fills", &req).await
+    }
+
+    /// Returns L2 order book snapshot.
+    pub async fn l2_book(
+        &self,
+        coin: String,
+        n_sig_figs: Option<u8>,
+        mantissa: Option<u8>,
+    ) -> Result<L2Book> {
+        let req = InfoRequest::L2Book {
+            coin,
+            n_sig_figs,
+            mantissa,
+        };
+        self.send_info_request("l2_book", &req).await
+    }
+
+    /// Former name of [`Self::l2_book`].
+    pub async fn l2_book_info(
+        &self,
+        coin: String,
+        n_sig_figs: Option<u8>,
+        mantissa: Option<u8>,
+    ) -> Result<L2Book> {
+        self.l2_book(coin, n_sig_figs, mantissa).await
+    }
+
+    /// Returns simple open orders for a user.
+    pub async fn simple_open_orders(&self, user: Address) -> Result<Vec<serde_json::Value>> {
+        let req = InfoRequest::OpenOrders { user };
+        self.send_info_request("simple_open_orders", &req).await
+    }
+
+    // --- Undocumented info requests ---
+    //
+    // None of these appear in the gitbook, but mainnet answers all of them. Where the
+    // response shape is stable it is modelled; the rest return raw JSON.
+
+    /// Returns exchange-wide status flags and server time.
+    pub async fn exchange_status(&self) -> Result<ExchangeStatus> {
+        self.send_info_request("exchange_status", &InfoRequest::ExchangeStatus)
+            .await
+    }
+
+    /// Returns the IP addresses of the gossip root nodes.
+    pub async fn gossip_root_ips(&self) -> Result<Vec<String>> {
+        self.send_info_request("gossip_root_ips", &InfoRequest::GossipRootIps)
+            .await
+    }
+
+    /// Returns whether the user has VIP fee status.
+    pub async fn is_vip(&self, user: Address) -> Result<bool> {
+        self.send_info_request("is_vip", &InfoRequest::IsVip { user })
+            .await
+    }
+
+    /// Returns the vaults the user leads.
+    pub async fn leading_vaults(&self, user: Address) -> Result<serde_json::Value> {
+        self.send_info_request("leading_vaults", &InfoRequest::LeadingVaults { user })
+            .await
+    }
+
+    /// Returns whether the user has accepted terms and may trade.
+    pub async fn legal_check(&self, user: Address) -> Result<LegalCheck> {
+        self.send_info_request("legal_check", &InfoRequest::LegalCheck { user })
+            .await
+    }
+
+    /// Returns the accounts currently eligible for liquidation.
+    pub async fn liquidatable(&self) -> Result<serde_json::Value> {
+        self.send_info_request("liquidatable", &InfoRequest::Liquidatable)
+            .await
+    }
+
+    /// Returns one margin table by id.
+    pub async fn margin_table(&self, id: u32) -> Result<MarginTable> {
+        self.send_info_request("margin_table", &InfoRequest::MarginTable { id })
+            .await
+    }
+
+    /// Returns the maximum market order notional for each leverage bucket,
+    /// as `(leverage, max notional)` pairs.
+    pub async fn max_market_order_ntls(&self) -> Result<Vec<(u32, Decimal)>> {
+        self.send_info_request("max_market_order_ntls", &InfoRequest::MaxMarketOrderNtls)
+            .await
+    }
+
+    /// Returns the sanction, existence and fee checks for transferring from `source` to `user`.
+    pub async fn pre_transfer_check(
+        &self,
+        user: Address,
+        source: Address,
+    ) -> Result<PreTransferCheck> {
+        let req = InfoRequest::PreTransferCheck { user, source };
+        self.send_info_request("pre_transfer_check", &req).await
+    }
+
+    /// Returns recent trades for a coin.
+    pub async fn recent_trades(&self, coin: String) -> Result<Vec<Trade>> {
+        self.send_info_request("recent_trades", &InfoRequest::RecentTrades { coin })
+            .await
+    }
+
+    /// Returns the user's subaccounts in the newer response shape.
+    ///
+    /// [`subaccounts`](Self::subaccounts) returns the documented shape.
+    pub async fn subaccounts2(&self, user: Address) -> Result<serde_json::Value> {
+        self.send_info_request("subaccounts2", &InfoRequest::SubAccounts2 { user })
+            .await
+    }
+
+    /// Returns the user's TWAP order history.
+    pub async fn twap_history(&self, user: Address) -> Result<serde_json::Value> {
+        self.send_info_request("twap_history", &InfoRequest::TwapHistory { user })
+            .await
+    }
+
+    /// Returns which bridge USDC deposits and withdrawals currently route over.
+    pub async fn usdc_routing(&self) -> Result<UsdcRouting> {
+        self.send_info_request("usdc_routing", &InfoRequest::UsdcRouting)
+            .await
+    }
+
+    /// Returns the user's accrued borrow/lend interest.
+    pub async fn user_borrow_lend_interest(
+        &self,
+        user: Address,
+        start_time: u64,
+        end_time: Option<u64>,
+    ) -> Result<serde_json::Value> {
+        let req = InfoRequest::UserBorrowLendInterest {
+            user,
+            start_time,
+            end_time,
+        };
+        self.send_info_request("user_borrow_lend_interest", &req)
+            .await
+    }
+
+    /// Returns the user's TWAP slice fills within a time range.
+    pub async fn user_twap_slice_fills_by_time(
+        &self,
+        user: Address,
+        start_time: u64,
+        end_time: Option<u64>,
+        aggregate_by_time: Option<bool>,
+    ) -> Result<Vec<TwapSliceFill>> {
+        let req = InfoRequest::UserTwapSliceFillsByTime {
+            user,
+            start_time,
+            end_time,
+            aggregate_by_time,
+        };
+        self.send_info_request("user_twap_slice_fills_by_time", &req)
+            .await
+    }
+
+    /// Returns pending validator votes on L1 actions.
+    pub async fn validator_l1_votes(&self) -> Result<serde_json::Value> {
+        self.send_info_request("validator_l1_votes", &InfoRequest::ValidatorL1Votes)
+            .await
+    }
+
+    /// Returns every validator's stake, commission and uptime.
+    pub async fn validator_summaries(&self) -> Result<serde_json::Value> {
+        self.send_info_request("validator_summaries", &InfoRequest::ValidatorSummaries)
+            .await
+    }
+
+    /// Returns every vault's headline stats.
+    pub async fn vault_summaries(&self) -> Result<serde_json::Value> {
+        self.send_info_request("vault_summaries", &InfoRequest::VaultSummaries)
+            .await
+    }
+
+    /// Returns the frontend-style aggregate account snapshot.
+    ///
+    /// The matching websocket subscription was removed; subscribe to
+    /// [`Subscription::WebData3`](crate::hypercore::types::Subscription::WebData3) for a live
+    /// feed.
+    pub async fn web_data2(&self, user: Address, dex: Option<String>) -> Result<serde_json::Value> {
+        self.send_info_request("web_data2", &InfoRequest::WebData2 { user, dex })
+            .await
+    }
+
+    // --- Exchange actions (Phase 2) ---
+
+    /// Place a TWAP order.
+    pub async fn twap_order<S: SignerSync>(
+        &self,
+        signer: &S,
+        params: TwapOrderParams,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::TwapOrder { twap: params };
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await
+    }
+
+    /// Cancel a TWAP order.
+    pub async fn twap_cancel<S: SignerSync>(
+        &self,
+        signer: &S,
+        asset: usize,
+        twap_id: u64,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Response> {
+        let action = Action::TwapCancel {
+            a: asset,
+            t: twap_id,
+        };
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await
+    }
+
+    /// Withdraw to Arbitrum L1.
+    pub async fn withdraw<S: SignerSync>(
+        &self,
+        signer: &S,
+        destination: Address,
+        amount: Decimal,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::Withdraw3(Withdraw3Action {
+            signature_chain_id: self.chain.arbitrum_id().to_string(),
+            hyperliquid_chain: self.chain,
+            destination,
+            amount,
+            time: nonce,
+        });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Transfer between spot and perp balances.
+    pub async fn usd_class_transfer<S: SignerSync>(
+        &self,
+        signer: &S,
+        amount: Decimal,
+        to_perp: bool,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::UsdClassTransfer(UsdClassTransferAction {
+            signature_chain_id: self.chain.arbitrum_id().to_string(),
+            hyperliquid_chain: self.chain,
+            amount: amount.to_string(),
+            to_perp,
+            nonce,
+        });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Stake native token (HYPE).
+    pub async fn stake<S: SignerSync>(
+        &self,
+        signer: &S,
+        wei: u64,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::CDeposit { wei };
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Unstake native token (HYPE). 7-day queue.
+    pub async fn unstake<S: SignerSync>(
+        &self,
+        signer: &S,
+        wei: u64,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::CWithdraw { wei };
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Delegate or undelegate staked tokens to a validator.
+    pub async fn token_delegate<S: SignerSync>(
+        &self,
+        signer: &S,
+        validator: Address,
+        is_undelegate: bool,
+        wei: u64,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::TokenDelegate(TokenDelegateAction {
+            signature_chain_id: self.chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: self.chain,
+            validator,
+            is_undelegate,
+            wei,
+            nonce,
+        });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Reserve rate-limit request capacity.
+    ///
+    /// `destination` credits the reserved capacity to another account; `None` credits the signer.
+    pub async fn reserve_request_weight<S: SignerSync>(
+        &self,
+        signer: &S,
+        weight: u32,
+        destination: Option<Address>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::ReserveRequestWeight {
+            weight,
+            destination,
+        };
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// HIP-3 backstop liquidator transfer.
+    pub async fn hip3_liquidator_transfer<S: SignerSync>(
+        &self,
+        signer: &S,
+        dex: String,
+        ntl: u64,
+        is_deposit: bool,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::Hip3LiquidatorTransfer(Hip3LiquidatorTransferAction {
+            dex,
+            ntl,
+            is_deposit,
+        });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Send a HIP-1/HIP-2 spot deploy action, or a HIP-4 outcome deploy action.
+    ///
+    /// Deploying a token is the five-step sequence described on [`SpotDeployAction`]. Lists of
+    /// tuples must already be sorted, since the signature covers their encoding.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/deploying-hip-1-and-hip-2-assets>
+    pub async fn spot_deploy<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: SpotDeployAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SpotDeploy(action);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Send a HIP-3 perp DEX deployer action.
+    ///
+    /// Lists of tuples must already be sorted, since the signature covers their encoding.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-3-deployer-actions>
+    pub async fn perp_deploy<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: PerpDeployAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::PerpDeploy(action);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Send a HIP-4 outcome deployer action.
+    ///
+    /// Lists of tuples must already be sorted, since the signature covers their encoding.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions#action-reference>
+    pub async fn outcome_deploy<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: OutcomeDeployAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::OutcomeDeploy(action);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Activate or permanently retire a HIP-4 outcome deployer.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions#activation>
+    pub async fn activate_outcome_deployer<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: ActivateOutcomeDeployer,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::ActivateOutcomeDeployer(action);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Transfer a token from Core to the EVM with an extra data payload.
+    ///
+    /// The recipient contract must implement `ICoreReceiveWithData`. `nonce` is written into the
+    /// action as well as the request envelope, so both must match.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#send-to-evm-with-data>
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_to_evm_with_data<S: SignerSync>(
+        &self,
+        signer: &S,
+        token: String,
+        amount: Decimal,
+        source_dex: String,
+        destination_recipient: String,
+        address_encoding: AddressEncoding,
+        destination_chain_id: u32,
+        gas_limit: u64,
+        data: Bytes,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SendToEvmWithData(SendToEvmWithDataAction {
+            signature_chain_id: self.chain.arbitrum_id().to_string(),
+            hyperliquid_chain: self.chain,
+            token,
+            amount,
+            source_dex,
+            destination_recipient,
+            address_encoding,
+            destination_chain_id,
+            gas_limit,
+            data,
+            nonce,
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Add isolated margin to a position until it reaches `leverage`.
+    ///
+    /// The leverage-targeting counterpart to [`update_isolated_margin`](Self::update_isolated_margin),
+    /// which moves a fixed USDC amount instead.
+    pub async fn top_up_isolated_only_margin<S: SignerSync>(
+        &self,
+        signer: &S,
+        asset: u32,
+        leverage: Decimal,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::TopUpIsolatedOnlyMargin(TopUpIsolatedOnlyMargin { asset, leverage });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Claim accrued referral and builder rewards.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#claim-rewards>
+    pub async fn claim_rewards<S: SignerSync>(
+        &self,
+        signer: &S,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let req = Action::ClaimRewards.sign_sync(
+            signer,
+            nonce,
+            vault_address,
+            expires_after,
+            self.chain,
+        )?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Authorize an AQAv2 role for an aligned quote asset.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#authorize-aqav2-role>
+    pub async fn authorize_aqav2_role<S: SignerSync>(
+        &self,
+        signer: &S,
+        token: u32,
+        role: Aqav2Role,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::AuthorizeAqav2Role(AuthorizeAqav2Role { token, role });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Validator vote on the risk-free rate for an aligned quote asset.
+    ///
+    /// Only meaningful when the signer is a validator.
+    pub async fn validator_l1_stream<S: SignerSync>(
+        &self,
+        signer: &S,
+        risk_free_rate: Decimal,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::ValidatorL1Stream(ValidatorL1Stream { risk_free_rate });
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Replace a single resting order.
+    ///
+    /// [`modify`](Self::modify) is the batch form. See [`ModifyAction::always_place`] for what
+    /// the replacement order is restricted to when that flag is `false`.
+    pub async fn modify_order<S: SignerSync>(
+        &self,
+        signer: &S,
+        modify: ModifyAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Vec<OrderResponseStatus>> {
+        let action = Action::Modify(modify);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        match self.send(req).await? {
+            Response::Ok(OkResponse::Order { statuses }) => Ok(statuses),
+            Response::Err(err) => Err(ApiError(err).into()),
+            other => Err(ApiError(format!("unexpected response: {other:?}")).into()),
+        }
+    }
+
+    // --- Undocumented exchange actions ---
+    //
+    // None of these appear in the gitbook, but mainnet accepts all of them. Shapes are
+    // cross-checked against the nktkas TypeScript SDK.
+
+    /// Supply, withdraw, repay or borrow on the borrow/lend markets.
+    ///
+    /// A `None` amount means the maximum available.
+    pub async fn borrow_lend<S: SignerSync>(
+        &self,
+        signer: &S,
+        borrow_lend: BorrowLendAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::BorrowLend(borrow_lend);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Create a sub-account and return its address.
+    pub async fn create_sub_account<S: SignerSync>(
+        &self,
+        signer: &S,
+        name: String,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Address> {
+        let action = Action::CreateSubAccount { name };
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        match self.send(req).await? {
+            Response::Ok(OkResponse::CreateSubAccount(address)) => Ok(address),
+            Response::Err(err) => Err(ApiError(err).into()),
+            other => Err(ApiError(format!("unexpected response: {other:?}")).into()),
+        }
+    }
+
+    /// Rename a sub-account.
+    pub async fn sub_account_modify<S: SignerSync>(
+        &self,
+        signer: &S,
+        sub_account_user: Address,
+        name: String,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SubAccountModify(SubAccountModify {
+            sub_account_user,
+            name,
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Move perp USDC to or from a sub-account. `usd` is in 1e-6 units.
+    pub async fn sub_account_transfer<S: SignerSync>(
+        &self,
+        signer: &S,
+        sub_account_user: Address,
+        is_deposit: bool,
+        usd: u64,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SubAccountTransfer(SubAccountTransfer {
+            sub_account_user,
+            is_deposit,
+            usd,
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Move a spot token to or from a sub-account.
+    ///
+    /// `token` is the `NAME:0x...` identifier from `spotMeta`.
+    pub async fn sub_account_spot_transfer<S: SignerSync>(
+        &self,
+        signer: &S,
+        transfer: SubAccountSpotTransfer,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SubAccountSpotTransfer(transfer);
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Create a vault led by the signer and return its address.
+    ///
+    /// `initial_usd` is in 1e-6 USDC units and must be at least 100 USDC. The action carries
+    /// the nonce a second time, which this sets for you.
+    pub async fn create_vault<S: SignerSync>(
+        &self,
+        signer: &S,
+        name: String,
+        description: String,
+        initial_usd: u64,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<Address> {
+        let action = Action::CreateVault(CreateVault {
+            name,
+            description,
+            initial_usd,
+            nonce,
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        match self.send(req).await? {
+            Response::Ok(OkResponse::CreateVault(address)) => Ok(address),
+            Response::Err(err) => Err(ApiError(err).into()),
+            other => Err(ApiError(format!("unexpected response: {other:?}")).into()),
+        }
+    }
+
+    /// Change a vault's deposit and withdrawal policy. `None` leaves a setting unchanged.
+    pub async fn vault_modify<S: SignerSync>(
+        &self,
+        signer: &S,
+        vault_address: Address,
+        allow_deposits: Option<bool>,
+        always_close_on_withdraw: Option<bool>,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::VaultModify(VaultModify {
+            vault_address,
+            allow_deposits,
+            always_close_on_withdraw,
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Pay USDC from a vault leader's balance out to depositors.
+    ///
+    /// `usd` is in 1e-6 units; `0` closes the vault.
+    pub async fn vault_distribute<S: SignerSync>(
+        &self,
+        signer: &S,
+        vault_address: Address,
+        usd: u64,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::VaultDistribute(VaultDistribute { vault_address, usd });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Set the display name shown on the leaderboard. An empty string clears it.
+    pub async fn set_display_name<S: SignerSync>(
+        &self,
+        signer: &S,
+        display_name: String,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SetDisplayName { display_name };
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Record the referral code the signer was referred by. Can only be set once.
+    pub async fn set_referrer<S: SignerSync>(
+        &self,
+        signer: &S,
+        code: String,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SetReferrer { code };
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Claim a referral code for the signer to refer others with.
+    pub async fn register_referrer<S: SignerSync>(
+        &self,
+        signer: &S,
+        code: String,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::RegisterReferrer { code };
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Opt in or out of automatic dusting of small spot balances.
+    pub async fn toggle_spot_dusting<S: SignerSync>(
+        &self,
+        signer: &S,
+        opt_out: bool,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::SpotUser(SpotUserAction {
+            toggle_spot_dusting: ToggleSpotDusting { opt_out },
+        });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Link a HyperEVM contract to a HIP-1 token so the token can be traded on the EVM.
+    pub async fn finalize_evm_contract<S: SignerSync>(
+        &self,
+        signer: &S,
+        token: u32,
+        input: FinalizeEvmContractInput,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::FinalizeEvmContract(FinalizeEvmContract { token, input });
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Jail or unjail the signer's own validator.
+    pub async fn c_signer_action<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: CSignerAction,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::CSignerAction(action);
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Register, reconfigure, or deregister the signer's validator.
+    pub async fn c_validator_action<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: CValidatorAction,
+        nonce: u64,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let action = Action::CValidatorAction(action);
+        let req = action.sign_sync(signer, nonce, None, expires_after, self.chain)?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Link a staking account to a trading account.
+    ///
+    /// Sent twice: the staking account signs with `is_finalize = false`, then the trading
+    /// account signs with `is_finalize = true`. Each signer passes the *other* account as
+    /// `user`.
+    pub async fn link_staking_user<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        user: Address,
+        is_finalize: bool,
+        nonce: u64,
+    ) -> Result<()> {
+        let action = Action::LinkStakingUser(LinkStakingUserAction {
+            signature_chain_id: self.chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: self.chain,
+            user,
+            is_finalize,
+            nonce,
+        });
+        let req = action.sign(signer, nonce, None, None, self.chain).await?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Remove a trading account's staking link.
+    pub async fn staking_link_disable_trading_user<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        trading_user: Address,
+        nonce: u64,
+    ) -> Result<()> {
+        let action = Action::StakingLinkDisableTradingUser(StakingLinkDisableTradingUserAction {
+            signature_chain_id: self.chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: self.chain,
+            trading_user,
+            nonce,
+        });
+        let req = action.sign(signer, nonce, None, None, self.chain).await?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Enable or disable portfolio margin for an account.
+    pub async fn user_portfolio_margin<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        user: Address,
+        enabled: bool,
+        nonce: u64,
+    ) -> Result<()> {
+        let action = Action::UserPortfolioMargin(UserPortfolioMarginAction {
+            signature_chain_id: self.chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: self.chain,
+            user,
+            enabled,
+            nonce,
+        });
+        let req = action.sign(signer, nonce, None, None, self.chain).await?;
+        self.send(req).await?.into_default()
+    }
+
+    /// Submit a HIP-4 outcome action (`userOutcome`): split, merge, or negate outcome tokens.
+    ///
+    /// See [`UserOutcomeAction`] for the available operations and their semantics, or use the
+    /// convenience methods [`split_outcome`](Self::split_outcome),
+    /// [`merge_outcome`](Self::merge_outcome), [`merge_outcome_question`](Self::merge_outcome_question),
+    /// and [`negate_outcome`](Self::negate_outcome).
+    pub fn user_outcome<S: SignerSync>(
+        &self,
+        signer: &S,
+        action: UserOutcomeAction,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let future = self.sign_and_send_sync(
+            signer,
+            Action::UserOutcome(action),
+            nonce,
+            vault_address,
+            expires_after,
+        );
+        async move { future.await?.into_default() }
+    }
+
+    /// Split `amount` of the quote token into one share of each side of `outcome`.
+    pub fn split_outcome<S: SignerSync>(
+        &self,
+        signer: &S,
+        outcome: u32,
+        amount: Decimal,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.user_outcome(
+            signer,
+            UserOutcomeAction::split(outcome, amount),
+            nonce,
+            vault_address,
+            expires_after,
+        )
+    }
+
+    /// Merge matching shares of `outcome` back into the quote token.
+    ///
+    /// `amount = None` merges the maximum available.
+    pub fn merge_outcome<S: SignerSync>(
+        &self,
+        signer: &S,
+        outcome: u32,
+        amount: Option<Decimal>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.user_outcome(
+            signer,
+            UserOutcomeAction::merge(outcome, amount),
+            nonce,
+            vault_address,
+            expires_after,
+        )
+    }
+
+    /// Merge a full set of mutually-exclusive outcomes within `question` back into the quote token.
+    ///
+    /// `amount = None` merges the maximum available.
+    pub fn merge_outcome_question<S: SignerSync>(
+        &self,
+        signer: &S,
+        question: u32,
+        amount: Option<Decimal>,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.user_outcome(
+            signer,
+            UserOutcomeAction::merge_question(question, amount),
+            nonce,
+            vault_address,
+            expires_after,
+        )
+    }
+
+    /// Negate `outcome` within `question`, converting its shares into the complementary basket.
+    pub fn negate_outcome<S: SignerSync>(
+        &self,
+        signer: &S,
+        question: u32,
+        outcome: u32,
+        amount: Decimal,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.user_outcome(
+            signer,
+            UserOutcomeAction::negate(question, outcome, amount),
+            nonce,
+            vault_address,
+            expires_after,
+        )
+    }
 }
 
 /// Builder for constructing and executing multisig transactions on Hyperliquid.
@@ -2609,13 +3589,15 @@ where
     ) -> Result<Vec<OrderResponseStatus>, ActionError<Cloid>> {
         let cloids: Vec<_> = batch.orders.iter().map(|req| req.cloid).collect();
 
-        let action = multisig_collect_signatures(
+        let action = multisig_collect_signatures_with_context(
             self.lead.address(),
             self.multi_sig_user,
             self.signers.iter().copied(),
             self.signatures.iter().copied(),
             Action::Order(batch),
             self.nonce,
+            vault_address,
+            expires_after,
             self.client.chain,
         )
         .await
@@ -2707,11 +3689,7 @@ where
             .sign_and_send(self.lead, action, self.nonce, None, None)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("send_usdc: {err}"),
-            _ => anyhow::bail!("send_usdc: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Send assets from the multisig account.
@@ -2787,11 +3765,7 @@ where
             .sign_and_send(self.lead, action, self.nonce, None, None)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("send_asset: {err}"),
-            _ => anyhow::bail!("send_asset: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 
     /// Approve a new agent for the multisig account.
@@ -2847,11 +3821,38 @@ where
             .sign_and_send(self.lead, action, self.nonce, None, None)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("approve_agent: {err}"),
-            _ => anyhow::bail!("approve_agent: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
+    }
+
+    /// Approve the maximum fee rate a builder can charge for routed orders.
+    pub async fn approve_builder_fee(&self, builder: Address, max_fee_rate: String) -> Result<()> {
+        let chain = self.client.chain;
+
+        let approve_builder_fee = ApproveBuilderFee {
+            signature_chain_id: chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: chain,
+            max_fee_rate,
+            builder,
+            nonce: self.nonce,
+        };
+
+        let action = multisig_collect_signatures(
+            self.lead.address(),
+            self.multi_sig_user,
+            self.signers.iter().copied(),
+            self.signatures.iter().copied(),
+            Action::ApproveBuilderFee(approve_builder_fee),
+            self.nonce,
+            self.client.chain,
+        )
+        .await?;
+
+        let resp = self
+            .client
+            .sign_and_send(self.lead, action, self.nonce, None, None)
+            .await?;
+
+        resp.into_default()
     }
 
     /// Convert multisig account back to normal user.
@@ -2899,10 +3900,6 @@ where
             .sign_and_send(self.lead, action, self.nonce, None, None)
             .await?;
 
-        match resp {
-            Response::Ok(OkResponse::Default) => Ok(()),
-            Response::Err(err) => anyhow::bail!("convert_to_normal_user: {err}"),
-            _ => anyhow::bail!("convert_to_normal_user: unexpected response type: {resp:?}"),
-        }
+        resp.into_default()
     }
 }

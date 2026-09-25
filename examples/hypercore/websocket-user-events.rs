@@ -7,7 +7,8 @@
 //! - `userTwapSliceFills`
 //! - `userTwapHistory`
 //! - `activeAssetData`
-//! - `webData2`
+//! - `webData3`
+//! - `userHistoricalOrders`
 //!
 //! # Usage
 //!
@@ -60,7 +61,15 @@ async fn main() -> anyhow::Result<()> {
         user,
         coin: args.coin.clone(),
     });
-    ws.subscribe(Subscription::WebData2 { user, dex: None });
+    ws.subscribe(Subscription::WebData3 { user });
+    ws.subscribe(Subscription::UserHistoricalOrders { user });
+    ws.subscribe(Subscription::ClearinghouseState { user, dex: None });
+    ws.subscribe(Subscription::AllDexsClearinghouseState { user });
+    ws.subscribe(Subscription::OpenOrders { user, dex: None });
+    ws.subscribe(Subscription::SpotState {
+        user,
+        is_portfolio_margin: None,
+    });
 
     log::info!(
         "Subscribed for user={} coin={}. Waiting for events...",
@@ -142,9 +151,49 @@ async fn main() -> anyhow::Result<()> {
                         data.coin, data.leverage.leverage_type, data.leverage.value, max_sz, avail
                     );
                 }
-                Incoming::WebData2 { data: payload, .. } => {
+                Incoming::WebData3 { data: payload } => {
                     let keys = payload.as_object().map(|m| m.len()).unwrap_or(0);
-                    println!("webData2: object_keys={}", keys);
+                    println!("webData3: object_keys={}", keys);
+                }
+                Incoming::UserHistoricalOrders {
+                    is_snapshot,
+                    order_history,
+                    ..
+                } => {
+                    println!(
+                        "userHistoricalOrders: snapshot={} n={}",
+                        is_snapshot,
+                        order_history.len()
+                    );
+                }
+                Incoming::ClearinghouseState {
+                    dex,
+                    user,
+                    clearinghouse_state,
+                } => {
+                    println!(
+                        "clearingHouseState: user={} dex={:?} clearinghouse_state={:?}",
+                        user, dex, clearinghouse_state
+                    );
+                }
+                Incoming::AllDexsClearinghouseState {
+                    user,
+                    clearinghouse_states,
+                } => {
+                    println!(
+                        "allDexsClearinghouseState: user={} clearinghouse_states={}",
+                        user,
+                        clearinghouse_states.len()
+                    );
+                }
+                Incoming::SpotState { user, spot_state } => {
+                    println!("SpotState: user={} spot_state={:?}", user, spot_state);
+                }
+                Incoming::OpenOrders { dex, user, orders } => {
+                    println!(
+                        "openOrders: user={} dex={:?} orders={:?}",
+                        user, dex, orders,
+                    );
                 }
                 Incoming::SubscriptionResponse(resp) => {
                     println!("subscriptionResponse: {:?}", resp);
