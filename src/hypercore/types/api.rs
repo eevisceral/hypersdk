@@ -88,6 +88,8 @@ pub enum Action {
         using_big_blocks: bool,
     },
     ApproveAgent(ApproveAgent),
+    /// Main-wallet approval of a builder-fee cap. Agents cannot sign this.
+    ApproveBuilderFee(ApproveBuilderFee),
     /// Convert to multi-signature user.
     ConvertToMultiSigUser(ConvertToMultiSigUser),
     /// Update isolated margin.
@@ -100,6 +102,10 @@ pub enum Action {
     MultiSig(MultiSigAction),
     /// Invalidate a request.
     Noop,
+    /// Claim referral and builder rewards. L1-signed, same path as an order.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#claim-rewards>
+    ClaimRewards,
     /// Gossip priority bid (Dutch auction for read priority).
     GossipPriorityBid(GossipPriorityBid),
     /// Agent-signed: Enable DEX abstraction (deprecated, being discontinued).
@@ -289,6 +295,7 @@ impl Action {
             | Action::VaultTransfer(_)
             | Action::AgentSendAsset(_)
             | Action::Noop
+            | Action::ClaimRewards
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
@@ -316,6 +323,10 @@ impl Action {
             }
             Action::ApproveAgent(inner) => {
                 let typed_data = get_typed_data::<solidity::ApproveAgent>(&inner, chain, None);
+                signer.sign_dynamic_typed_data_sync(&typed_data)?
+            }
+            Action::ApproveBuilderFee(inner) => {
+                let typed_data = get_typed_data::<solidity::ApproveBuilderFee>(&inner, chain, None);
                 signer.sign_dynamic_typed_data_sync(&typed_data)?
             }
             Action::ConvertToMultiSigUser(inner) => {
@@ -397,6 +408,7 @@ impl Action {
             | Action::VaultTransfer(_)
             | Action::AgentSendAsset(_)
             | Action::Noop
+            | Action::ClaimRewards
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
@@ -426,6 +438,10 @@ impl Action {
             }
             Action::ApproveAgent(inner) => {
                 let typed_data = get_typed_data::<solidity::ApproveAgent>(&inner, chain, None);
+                signer.sign_dynamic_typed_data(&typed_data).await?
+            }
+            Action::ApproveBuilderFee(inner) => {
+                let typed_data = get_typed_data::<solidity::ApproveBuilderFee>(&inner, chain, None);
                 signer.sign_dynamic_typed_data(&typed_data).await?
             }
             Action::ConvertToMultiSigUser(inner) => {
@@ -502,6 +518,7 @@ impl Action {
             | Action::VaultTransfer(_)
             | Action::AgentSendAsset(_)
             | Action::Noop
+            | Action::ClaimRewards
             | Action::GossipPriorityBid(_)
             | Action::AgentEnableDexAbstraction
             | Action::AgentSetAbstraction { .. }
@@ -532,6 +549,10 @@ impl Action {
             }
             Action::ApproveAgent(inner) => {
                 let typed_data = get_typed_data::<solidity::ApproveAgent>(&inner, chain, None);
+                Ok(typed_data.eip712_signing_hash()?)
+            }
+            Action::ApproveBuilderFee(inner) => {
+                let typed_data = get_typed_data::<solidity::ApproveBuilderFee>(&inner, chain, None);
                 Ok(typed_data.eip712_signing_hash()?)
             }
             Action::ConvertToMultiSigUser(inner) => {
@@ -790,6 +811,24 @@ pub struct ApproveAgent {
     /// up to 3 named ones, and 2 named agents per subaccount.
     pub agent_name: Option<String>,
     /// Request nonce
+    pub nonce: u64,
+}
+
+/// Approve a maximum builder fee. The main wallet signs this, not an agent.
+///
+/// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#approve-a-builder-fee>
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveBuilderFee {
+    pub signature_chain_id: String,
+    pub hyperliquid_chain: Chain,
+    /// Percent string, e.g. `"0.01%"` for 1 bp.
+    pub max_fee_rate: String,
+    #[serde(
+        serialize_with = "crate::hypercore::utils::serialize_address_as_hex",
+        deserialize_with = "crate::hypercore::utils::deserialize_address_from_hex"
+    )]
+    pub builder: Address,
     pub nonce: u64,
 }
 

@@ -60,9 +60,10 @@ use crate::hypercore::{
     ActionError, ApiAgent, CandleInterval, Chain, Cloid, Dex, GossipPriorityAuctionStatus, Market,
     MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, Signature, SpotMarket, SpotToken,
     api::{
-        Action, ActionRequest, ApproveAgent, ConvertToMultiSigUser, GossipPriorityBid,
-        NegateOutcomeAction, OkResponse, OutcomeAmountAction, QuestionAmountAction, Response,
-        SignersConfig, TwapOrderAction, UpdateLeverage, VaultTransfer,
+        Action, ActionRequest, ApproveAgent, ApproveBuilderFee, ConvertToMultiSigUser,
+        GossipPriorityBid, NegateOutcomeAction, OkResponse, OutcomeAmountAction,
+        QuestionAmountAction, Response, SignersConfig, TwapOrderAction, UpdateLeverage,
+        VaultTransfer,
     },
     mainnet_url, testnet_url,
     types::{
@@ -1095,6 +1096,31 @@ impl Client {
         self.send_info_request("user_role", &req).await
     }
 
+    /// Approved builder fee for `user` toward `builder`, in tenths of a basis point.
+    ///
+    /// `0` means the main wallet has not approved this builder. The info response is a bare number.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes>
+    pub async fn max_builder_fee(&self, user: Address, builder: Address) -> Result<u64> {
+        let req = InfoRequest::MaxBuilderFee { user, builder };
+        self.send_info_request("max_builder_fee", &req).await
+    }
+
+    /// Builder addresses `user` has approved. An empty list means none.
+    pub async fn approved_builders(&self, user: Address) -> Result<Vec<Address>> {
+        let req = InfoRequest::ApprovedBuilders { user };
+        self.send_info_request("approved_builders", &req).await
+    }
+
+    /// Referral and builder reward balances for `user`.
+    pub async fn referral_rewards(
+        &self,
+        user: Address,
+    ) -> Result<crate::hypercore::types::ReferralRewards> {
+        let req = InfoRequest::Referral { user };
+        self.send_info_request("referral", &req).await
+    }
+
     /// Retrieve a user's subaccounts.
     ///
     /// Returns all subaccounts associated with a master account, including their
@@ -1371,6 +1397,7 @@ impl Client {
                 cloid: Default::default(),
             }],
             grouping: OrderGrouping::Na,
+            builder: None,
         };
 
         self.place(signer, batch, nonce, vault_address, expires_after)
@@ -1542,6 +1569,55 @@ impl Client {
                 anyhow::bail!("approve_agent: {err}")
             }
             _ => anyhow::bail!("approve_agent: unexpected response type: {resp:?}"),
+        }
+    }
+
+    /// Approve a maximum builder fee. The signer must be the user's main wallet.
+    ///
+    /// `max_fee_rate` is a percent string such as `"0.01%"` (1 bp). Perps cap at `0.1%`.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#approve-a-builder-fee>
+    pub async fn approve_builder_fee<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        builder: Address,
+        max_fee_rate: String,
+        nonce: u64,
+    ) -> Result<()> {
+        let action = ApproveBuilderFee {
+            signature_chain_id: self.chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: self.chain,
+            max_fee_rate,
+            builder,
+            nonce,
+        };
+        let resp = self
+            .sign_and_send(signer, action, nonce, None, None)
+            .await?;
+        match resp {
+            Response::Ok(OkResponse::Default) => Ok(()),
+            Response::Err(err) => anyhow::bail!("approve_builder_fee: {err}"),
+            _ => anyhow::bail!("approve_builder_fee: unexpected response type: {resp:?}"),
+        }
+    }
+
+    /// Claim referral and builder rewards for the signing account.
+    ///
+    /// L1-signed. The exchange docs show the action as `{ "type": "claimRewards" }`.
+    /// Referral rewards claim once the unclaimed amount is greater than $1.
+    pub async fn claim_rewards<S: Signer + Send + Sync>(
+        &self,
+        signer: &S,
+        nonce: u64,
+        vault_address: Option<Address>,
+    ) -> Result<()> {
+        let resp = self
+            .sign_and_send(signer, Action::ClaimRewards, nonce, vault_address, None)
+            .await?;
+        match resp {
+            Response::Ok(OkResponse::Default) => Ok(()),
+            Response::Err(err) => anyhow::bail!("claim_rewards: {err}"),
+            _ => anyhow::bail!("claim_rewards: unexpected response type: {resp:?}"),
         }
     }
 
@@ -2504,6 +2580,7 @@ where
     /// let batch = BatchOrder {
     ///     orders: vec![order],
     ///     grouping: OrderGrouping::Na,
+    ///     builder: None,
     /// };
     ///
     /// let statuses = client

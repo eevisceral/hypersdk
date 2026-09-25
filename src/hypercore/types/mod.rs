@@ -1240,8 +1240,11 @@ pub struct Fill {
     pub oid: u64,
     /// True if taker (crossed spread)
     pub crossed: bool,
-    /// Fee amount
+    /// Fee amount. Includes `builderFee` when one was charged.
     pub fee: Decimal,
+    /// Builder fee portion of `fee`. Omitted by the exchange when it is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_fee: Option<Decimal>,
     /// Trade ID
     pub tid: u64,
     /// Client order ID
@@ -2207,6 +2210,7 @@ impl OrderResponseStatus {
 ///         }
 ///     ],
 ///     grouping: OrderGrouping::Na,
+///     builder: None,
 /// };
 /// ```
 ///
@@ -2231,6 +2235,7 @@ impl OrderResponseStatus {
 ///         }
 ///     ],
 ///     grouping: OrderGrouping::PriorityRate(80_000), // 8 bps max
+///     builder: None,
 /// };
 /// ```
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -2238,6 +2243,40 @@ impl OrderResponseStatus {
 pub struct BatchOrder {
     pub orders: Vec<OrderRequest>,
     pub grouping: OrderGrouping,
+    /// Optional builder code. Omitted from the signed payload when unset.
+    /// `b` is the builder address; `f` is tenths of a basis point (10 = 1 bp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder: Option<BuilderFee>,
+}
+
+/// Per-order builder fee. Sits on the order action, not on each order wire.
+///
+/// <https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes>
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuilderFee {
+    #[serde(rename = "b")]
+    #[serde(
+        serialize_with = "super::utils::serialize_address_as_hex",
+        deserialize_with = "super::utils::deserialize_address_from_hex"
+    )]
+    pub address: Address,
+    /// Tenths of a basis point. 10 = 1 bp = 0.01%.
+    #[serde(rename = "f")]
+    pub fee: u64,
+}
+
+/// Reward balances from `{"type":"referral"}`. Extra fields are ignored.
+///
+/// <https://hyperliquid.gitbook.io/hyperliquid-docs/referrals>
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferralRewards {
+    #[serde(default)]
+    pub unclaimed_rewards: String,
+    #[serde(default)]
+    pub claimed_rewards: String,
+    #[serde(default)]
+    pub builder_rewards: String,
 }
 
 /// Grouping type for batch orders.
@@ -3601,6 +3640,21 @@ pub(super) enum InfoRequest {
     UserRole {
         user: Address,
     },
+    /// Approved builder-fee cap for `user` toward `builder`, in tenths of a basis point.
+    /// A missing approval is `0`.
+    #[serde(rename = "maxBuilderFee")]
+    MaxBuilderFee {
+        user: Address,
+        builder: Address,
+    },
+    /// Builder addresses this user has approved.
+    ApprovedBuilders {
+        user: Address,
+    },
+    /// Referral and builder reward balances for `user`.
+    Referral {
+        user: Address,
+    },
     /// Retrieve a user's subaccounts.
     SubAccounts {
         user: Address,
@@ -4568,6 +4622,7 @@ mod tests {
                 cloid: Default::default(),
             }],
             grouping: OrderGrouping::PriorityRate(80_000),
+            builder: None,
         };
 
         let json = serde_json::to_string(&batch).unwrap();
@@ -4576,6 +4631,67 @@ mod tests {
             parsed.grouping,
             OrderGrouping::PriorityRate(80_000)
         ));
+        assert!(parsed.builder.is_none());
+    }
+
+    #[test]
+    fn batch_order_builder_fee_is_optional_on_the_action() {
+        use rust_decimal::dec;
+
+        let bare = BatchOrder {
+            orders: vec![OrderRequest {
+                asset: 0,
+                is_buy: true,
+                limit_px: dec!(1),
+                sz: dec!(1),
+                reduce_only: false,
+                order_type: OrderTypePlacement::Limit {
+                    tif: TimeInForce::Ioc,
+                },
+                cloid: Default::default(),
+            }],
+            grouping: OrderGrouping::Na,
+            builder: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("builder"));
+
+        let builder: Address = "0x8c967e73e7b15087c42a10d344cff4c96d877f1d"
+            .parse()
+            .unwrap();
+        let with = BatchOrder {
+            builder: Some(BuilderFee {
+                address: builder,
+                fee: 10,
+            }),
+            ..bare
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(
+            json.contains(r#""builder":{"b":"0x8c967e73e7b15087c42a10d344cff4c96d877f1d","f":10}"#)
+        );
+    }
+
+    #[test]
+    fn claim_rewards_is_an_l1_action_with_only_its_type() {
+        let v = serde_json::to_value(Action::ClaimRewards).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "claimRewards"}));
+    }
+
+    #[test]
+    fn fill_keeps_builder_fee_and_referral_rewards_parse() {
+        let bare = r#"{"coin":"BTC","px":"1","sz":"1","side":"B","time":1,"startPosition":"0","dir":"Open Long","closedPnl":"0","hash":"0x","oid":1,"crossed":true,"fee":"0.01","tid":1,"feeToken":"USDC"}"#;
+        let fill: Fill = serde_json::from_str(bare).unwrap();
+        assert!(fill.builder_fee.is_none());
+        let with = r#"{"coin":"BTC","px":"1","sz":"1","side":"B","time":1,"startPosition":"0","dir":"Open Long","closedPnl":"0","hash":"0x","oid":1,"crossed":true,"fee":"0.02","builderFee":"0.01","tid":1,"feeToken":"USDC"}"#;
+        let fill: Fill = serde_json::from_str(with).unwrap();
+        assert_eq!(fill.builder_fee.unwrap().to_string(), "0.01");
+        let rewards: ReferralRewards = serde_json::from_str(
+            r#"{"unclaimedRewards":"1.5","claimedRewards":"0.0","builderRewards":"1.2","referredBy":null}"#,
+        )
+        .unwrap();
+        assert_eq!(rewards.builder_rewards, "1.2");
+        assert_eq!(rewards.unclaimed_rewards, "1.5");
     }
 
     #[test]

@@ -44,6 +44,17 @@ sol! {
         uint64 nonce;
     }
 
+    /// User-signed builder-fee cap.
+    ///
+    /// EIP-712 type: `HyperliquidTransaction:ApproveBuilderFee`.
+    /// `signatureChainId` is on the exchange action and is not part of this hash.
+    struct ApproveBuilderFee {
+        string hyperliquidChain;
+        string maxFeeRate;
+        address builder;
+        uint64 nonce;
+    }
+
     struct ConvertToMultiSigUser {
         string hyperliquidChain;
         string signers;
