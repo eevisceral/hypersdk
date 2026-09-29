@@ -4032,6 +4032,9 @@ pub struct PerpInfoUniverseItem {
     pub margin_mode: Option<super::MarginMode>,
     #[serde(default)]
     pub growth_mode: Option<String>,
+    /// HIP-3 deployer fee share. Absent on validator-operated perps.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub deployer_fee_scale: Option<Decimal>,
     #[serde(default, alias = "isAlignedQuoteToken", alias = "isQuoteTokenAligned")]
     pub aligned_quote_token: bool,
     #[serde(default)]

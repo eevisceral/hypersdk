@@ -84,10 +84,12 @@ mod tests {
             max_leverage: 40,
             isolated_margin: false,
             margin_mode: None,
+            deployer_fee_scale: None,
             growth_mode: false,
             aligned_quote_token: false,
             margin_table_id: 0,
             margin_tiers: Vec::new(),
+            delisted: false,
             table: PriceTick::for_perp(5),
             dex: None,
         }
