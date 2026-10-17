@@ -84,6 +84,7 @@ dependencies = [
  "alloy-core",
  "alloy-eips",
  "alloy-ens",
+ "alloy-genesis",
  "alloy-network",
  "alloy-provider",
  "alloy-rpc-client",
@@ -295,6 +296,21 @@ dependencies = [
  "alloy-sol-types",
  "async-trait",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "alloy-genesis"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4951473e6ff25cdf82eb87b6a1a5fbb4af9c97528398a4a62fbf516198ec5028"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-serde",
+ "alloy-trie",
+ "borsh",
+ "serde",
+ "serde_with",
 ]
 
 [[package]]
@@ -3558,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "hypersdk"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "alloy",
  "anyhow",

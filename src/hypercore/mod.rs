@@ -5,8 +5,8 @@
 //!
 //! # Components
 //!
-//! - [`HttpClient`]: HTTP client for API interactions (orders, queries, transfers)
-//! - [`WebSocket`]: Real-time WebSocket connection for market data and order updates
+//! - `HttpClient`: HTTP client for API interactions (orders, queries, transfers)
+//! - `WebSocket`: Real-time WebSocket connection for market data and order updates
 //! - Market types: [`PerpMarket`], [`SpotMarket`], [`SpotToken`]
 //! - Order types and operations in the [`types`] module
 //!
@@ -15,6 +15,9 @@
 //! ## Query Markets
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "http")]
+//! # {
 //! use hypersdk::hypercore;
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -33,11 +36,16 @@
 //! }
 //! # Ok(())
 //! # }
+//! # }
+//! # }
 //! ```
 //!
 //! ## WebSocket Market Data
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "ws")]
+//! # {
 //! use hypersdk::hypercore::{self, types::*, ws::Event};
 //! use futures::StreamExt;
 //!
@@ -69,11 +77,16 @@
 //! }
 //! # Ok(())
 //! # }
+//! # }
+//! # }
 //! ```
 //!
 //! ## Place Orders
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "http")]
+//! # {
 //! use hypersdk::hypercore::{self, types::*, PrivateKeySigner};
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -84,11 +97,15 @@
 //! // See the crate documentation for complete examples
 //! # Ok(())
 //! # }
+//! # }
+//! # }
 //! ```
 
 pub mod asset;
 pub mod error;
+#[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "http")]
 mod info_gate;
 pub mod signing;
 #[cfg(test)]
@@ -97,6 +114,7 @@ pub mod spot_evm_map;
 pub mod types;
 pub mod universe;
 mod utils;
+#[cfg(feature = "ws")]
 pub mod ws;
 
 pub use asset::{AssetSpec, parse_asset_spec, perp_name_matches, resolve_perp_market_index};
@@ -120,16 +138,18 @@ use chrono::Utc;
 use either::Either;
 /// Re-export error types.
 pub use error::{ActionError, ApiError};
+#[cfg(feature = "http")]
 use reqwest::IntoUrl;
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 /// Re-import types.
 pub use types::*;
+#[cfg(any(feature = "http", feature = "ws"))]
 use url::Url;
 
 use crate::{
     Address,
-    hyperevm::{from_wei, to_wei},
+    units::{from_wei, to_wei},
 };
 
 /// Client order ID (cloid).
@@ -147,10 +167,12 @@ pub type OidOrCloid = Either<u64, Cloid>;
 /// Re-export of the HTTP client for HyperCore API interactions.
 ///
 /// Use this client for placing orders, querying balances, and managing positions.
+#[cfg(feature = "http")]
 pub use http::Client as HttpClient;
 /// Re-export of the WebSocket connection for real-time market data.
 ///
 /// Use this for subscribing to trades, order books, and order updates.
+#[cfg(feature = "ws")]
 pub use ws::Connection as WebSocket;
 
 /// Thread-safe nonce generator for Hyperliquid transactions.
@@ -193,6 +215,9 @@ pub use ws::Connection as WebSocket;
 /// # Use with HTTP Client
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore::{self, NonceHandler};
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -204,6 +229,8 @@ pub use ws::Connection as WebSocket;
 /// let nonce2 = nonce_handler.next();
 /// # Ok(())
 /// # }
+/// # }
+/// # }
 /// ```
 pub struct NonceHandler {
     nonce: AtomicU64,
@@ -213,7 +240,8 @@ pub struct NonceHandler {
 ///
 /// Each [`OutcomeInfo`] produces N order books (one per [`OutcomeSideSpec`]).
 /// The market field stores the Hyperliquid asset index directly:
-/// `100_000_000 + outcome_id * 10 + side_index` where side_index is 0 for "Yes" and 1 otherwise.
+/// `100_000_000 + outcome_id * 10 + side_index`, where side_index is the side's position in
+/// [`OutcomeInfo::side_specs`].
 #[derive(Debug, Clone)]
 pub struct OutcomeMarket {
     /// Outcome metadata
@@ -529,11 +557,17 @@ pub const USDC_CONTRACT_IN_EVM: Address = address!("0xb88339CB7199b77E23DB6E8903
 /// # Example
 ///
 /// ```
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// let client = hypercore::mainnet();
+/// # }
+/// # }
 /// ```
 #[inline(always)]
+#[cfg(feature = "http")]
 pub fn mainnet() -> HttpClient {
     HttpClient::new(Chain::Mainnet)
 }
@@ -545,11 +579,17 @@ pub fn mainnet() -> HttpClient {
 /// # Example
 ///
 /// ```
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// let client = hypercore::testnet();
+/// # }
+/// # }
 /// ```
 #[inline(always)]
+#[cfg(feature = "http")]
 pub fn testnet() -> HttpClient {
     HttpClient::new(Chain::Testnet)
 }
@@ -561,6 +601,9 @@ pub fn testnet() -> HttpClient {
 /// # Example
 ///
 /// ```
+/// # fn main() {
+/// # #[cfg(feature = "ws")]
+/// # {
 /// use hypersdk::hypercore;
 /// use futures::StreamExt;
 ///
@@ -568,8 +611,11 @@ pub fn testnet() -> HttpClient {
 /// let mut ws = hypercore::mainnet_ws();
 /// // Subscribe to market data
 /// # }
+/// # }
+/// # }
 /// ```
 #[inline(always)]
+#[cfg(feature = "ws")]
 pub fn mainnet_ws() -> WebSocket {
     WebSocket::new(mainnet_websocket_url())
 }
@@ -578,6 +624,7 @@ pub fn mainnet_ws() -> WebSocket {
 ///
 /// URL: `https://api.hyperliquid.xyz`
 #[inline(always)]
+#[cfg(feature = "http")]
 pub fn mainnet_url() -> Url {
     "https://api.hyperliquid.xyz".parse().unwrap()
 }
@@ -586,6 +633,7 @@ pub fn mainnet_url() -> Url {
 ///
 /// URL: `wss://api.hyperliquid.xyz/ws`
 #[inline(always)]
+#[cfg(feature = "ws")]
 pub fn mainnet_websocket_url() -> Url {
     "wss://api.hyperliquid.xyz/ws".parse().unwrap()
 }
@@ -594,6 +642,7 @@ pub fn mainnet_websocket_url() -> Url {
 ///
 /// URL: `https://api.hyperliquid-testnet.xyz`
 #[inline(always)]
+#[cfg(feature = "http")]
 pub fn testnet_url() -> Url {
     "https://api.hyperliquid-testnet.xyz".parse().unwrap()
 }
@@ -602,6 +651,7 @@ pub fn testnet_url() -> Url {
 ///
 /// URL: `wss://api.hyperliquid-testnet.xyz/ws`
 #[inline(always)]
+#[cfg(feature = "ws")]
 pub fn testnet_websocket_url() -> Url {
     "wss://api.hyperliquid-testnet.xyz/ws".parse().unwrap()
 }
@@ -613,6 +663,9 @@ pub fn testnet_websocket_url() -> Url {
 /// # Example
 ///
 /// ```
+/// # fn main() {
+/// # #[cfg(feature = "ws")]
+/// # {
 /// use hypersdk::hypercore;
 /// use futures::StreamExt;
 ///
@@ -620,8 +673,11 @@ pub fn testnet_websocket_url() -> Url {
 /// let mut ws = hypercore::testnet_ws();
 /// // Subscribe to market data
 /// # }
+/// # }
+/// # }
 /// ```
 #[inline(always)]
+#[cfg(feature = "ws")]
 pub fn testnet_ws() -> WebSocket {
     WebSocket::new(testnet_websocket_url())
 }
@@ -868,6 +924,9 @@ pub fn effective_max_leverage_for_tiers(
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -879,6 +938,8 @@ pub fn effective_max_leverage_for_tiers(
 ///         market.name, market.max_leverage, market.collateral.name);
 /// }
 /// # Ok(())
+/// # }
+/// # }
 /// # }
 /// ```
 #[derive(Debug, Clone)]
@@ -1022,6 +1083,9 @@ impl PerpMarket {
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -1033,6 +1097,8 @@ impl PerpMarket {
 ///         market.name, market.tokens[0].name, market.tokens[1].name);
 /// }
 /// # Ok(())
+/// # }
+/// # }
 /// # }
 /// ```
 #[derive(Debug, Clone)]
@@ -1308,11 +1374,14 @@ mod tick_tests {
 ///
 /// Tokens with `evm_contract` set can be transferred between HyperCore and HyperEVM:
 /// - Use `cross_chain_address` as the destination when transferring to EVM
-/// - Use the HTTP client's [`HttpClient::transfer_to_evm`] method
+/// - Use the HTTP client's `HttpClient::transfer_to_evm` method
 ///
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -1325,6 +1394,8 @@ mod tick_tests {
 ///     }
 /// }
 /// # Ok(())
+/// # }
+/// # }
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::Display)]
@@ -1403,6 +1474,9 @@ impl SpotToken {
     /// # Example
     ///
     /// ```no_run
+    /// # fn main() {
+    /// # #[cfg(feature = "http")]
+    /// # {
     /// # use hypersdk::hypercore;
     /// # async fn example() -> anyhow::Result<()> {
     /// # let client = hypercore::mainnet();
@@ -1411,6 +1485,8 @@ impl SpotToken {
     ///     .filter(|t| t.is_evm_linked())
     ///     .collect();
     /// # Ok(())
+    /// # }
+    /// # }
     /// # }
     /// ```
     #[must_use]
@@ -1460,7 +1536,8 @@ pub struct OutcomeSideSpec {
 }
 
 /// Outcome market.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawOutcomeInfo")]
 pub struct OutcomeInfo {
     /// Outcome ID
     pub outcome: u32,
@@ -1470,6 +1547,13 @@ pub struct OutcomeInfo {
     pub description: String,
     /// The two sides of this outcome
     pub side_specs: Vec<OutcomeSideSpec>,
+    /// Token the outcome is quoted and settled in (e.g., "USDC")
+    pub quote_token: Option<String>,
+    /// Venue of the HIP-4 deployer that listed the outcome (e.g., "out"). `None` for outcomes
+    /// listed without one, such as the daily "Recurring" markets
+    pub venue: Option<String>,
+    /// The deployer fee scale for this outcome, if its deployer set one
+    pub deployer_fee_scale: Option<Decimal>,
 }
 
 /// Groups multiple outcomes into a question.
@@ -1494,6 +1578,66 @@ pub struct OutcomeQuestion {
 pub struct OutcomeMeta {
     pub outcomes: Vec<OutcomeInfo>,
     pub questions: Vec<OutcomeQuestion>,
+}
+
+/// How a HIP-4 outcome settled, from the `settledOutcome` info request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettledOutcome {
+    /// The outcome as it was listed
+    pub spec: OutcomeInfo,
+    /// Quote tokens paid per share of the first side. The second side receives
+    /// `1 - settle_fraction`
+    pub settle_fraction: Decimal,
+    /// Settlement details from the deployer, such as `price:78212.4`, or `template`
+    pub details: String,
+    /// The question the outcome belongs to, if any
+    pub question: Option<SettledOutcomeQuestion>,
+}
+
+/// The question a [`SettledOutcome`] belongs to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettledOutcomeQuestion {
+    /// Question ID, and whether the question has settled
+    pub question: OutcomeQuestionState,
+    /// Question name
+    pub name: String,
+    /// Question description
+    pub description: String,
+}
+
+/// Whether a question has settled, as reported with a [`SettledOutcome`].
+///
+/// The outcomes of a question can settle one at a time, so a settled outcome can belong to a
+/// question that is still active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutcomeQuestionState {
+    /// The question is still open, sent as `{"active": <question>}`
+    Active(u32),
+    /// The question has settled, sent as `{"settled": <question>}`
+    Settled(u32),
+    /// Any other shape, kept as raw JSON so nothing is dropped
+    Other(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for OutcomeQuestionState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // Only an object with exactly one known key and a question ID is a known state.
+        let known = value
+            .as_object()
+            .filter(|map| map.len() == 1)
+            .and_then(|map| {
+                let (state, question) = map.iter().next()?;
+                let question = u32::try_from(question.as_u64()?).ok()?;
+                match state.as_str() {
+                    "active" => Some(Self::Active(question)),
+                    "settled" => Some(Self::Settled(question)),
+                    _ => None,
+                }
+            });
+        Ok(known.unwrap_or(Self::Other(value)))
+    }
 }
 
 impl PartialEq for OutcomeInfo {
@@ -1597,6 +1741,7 @@ impl std::str::FromStr for RecurringEvent {
     }
 }
 
+#[cfg(feature = "http")]
 async fn raw_spot_markets(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1632,6 +1777,9 @@ async fn raw_spot_markets(
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -1644,7 +1792,10 @@ async fn raw_spot_markets(
 /// }
 /// # Ok(())
 /// # }
+/// # }
+/// # }
 /// ```
+#[cfg(feature = "http")]
 pub async fn spot_tokens(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1662,6 +1813,9 @@ pub async fn spot_tokens(
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -1674,7 +1828,10 @@ pub async fn spot_tokens(
 /// }
 /// # Ok(())
 /// # }
+/// # }
+/// # }
 /// ```
+#[cfg(feature = "http")]
 pub async fn spot_markets(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1720,6 +1877,9 @@ pub async fn spot_markets(
 /// # Example
 ///
 /// ```no_run
+/// # fn main() {
+/// # #[cfg(feature = "http")]
+/// # {
 /// use hypersdk::hypercore;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -1732,7 +1892,10 @@ pub async fn spot_markets(
 /// }
 /// # Ok(())
 /// # }
+/// # }
+/// # }
 /// ```
+#[cfg(feature = "http")]
 async fn raw_perp_dexes(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1759,6 +1922,7 @@ async fn raw_perp_dexes(
     .await
 }
 
+#[cfg(feature = "http")]
 fn dex_from_perp_dex(index: usize, dex: PerpDex) -> Dex {
     Dex {
         name: dex.name,
@@ -1767,6 +1931,7 @@ fn dex_from_perp_dex(index: usize, dex: PerpDex) -> Dex {
 }
 
 /// Returns every perp DEX name from `perpDexs`, preserving `null` for the native DEX slot.
+#[cfg(feature = "http")]
 pub async fn perp_dex_name_list(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1778,6 +1943,7 @@ pub async fn perp_dex_name_list(
         .collect())
 }
 
+#[cfg(feature = "http")]
 pub async fn perp_dexes(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1794,6 +1960,7 @@ pub async fn perp_dexes(
 
 /// Misspelled alias of [`perp_dexes`].
 #[deprecated(since = "0.2.9", note = "use perp_dexes instead")]
+#[cfg(feature = "http")]
 pub async fn perp_dexs(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1803,6 +1970,7 @@ pub async fn perp_dexs(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "http")]
 struct PerpDex {
     name: String,
 }
@@ -1810,6 +1978,7 @@ struct PerpDex {
 /// Fetches all available perpetual futures markets from HyperCore.
 ///
 /// Returns a list of all perpetual contracts with leverage, collateral, and margin information.
+#[cfg(feature = "http")]
 pub async fn perp_markets(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1881,6 +2050,7 @@ pub async fn perp_markets(
 }
 
 /// Fetches outcome market metadata from HyperCore.
+#[cfg(feature = "http")]
 pub async fn outcome_meta(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -1901,26 +2071,13 @@ pub async fn outcome_meta(
             if resp.status().as_u16() == 429 {
                 anyhow::bail!("[outcomeMeta] HTTP 429 Too Many Requests body=null");
             }
-            let raw: RawOutcomeMeta = resp.json().await?;
+            let raw: RawOutcomeMeta = resp.json().await.context("outcomeMeta")?;
             Ok(raw)
         }
     })
     .await
     .map(|raw: RawOutcomeMeta| OutcomeMeta {
-        outcomes: raw
-            .outcomes
-            .into_iter()
-            .map(|o| OutcomeInfo {
-                outcome: o.outcome,
-                name: o.name,
-                description: o.description,
-                side_specs: o
-                    .side_specs
-                    .into_iter()
-                    .map(|s| OutcomeSideSpec { name: s.name })
-                    .collect(),
-            })
-            .collect(),
+        outcomes: raw.outcomes.into_iter().map(OutcomeInfo::from).collect(),
         questions: raw
             .questions
             .into_iter()
@@ -1938,14 +2095,23 @@ pub async fn outcome_meta(
 
 /// Fetch all outcome markets, returning one [`OutcomeMarket`] per side.
 ///
-/// The market index is `100_000_000 + outcome * 10 + side_index` where
-/// `side_index` is the position in [`OutcomeInfo::side_specs`].
+/// The market index is `100_000_000 + outcome * 10 + side_index`, where `side_index` is the
+/// side's position in [`OutcomeInfo::side_specs`].
+#[cfg(feature = "http")]
 pub async fn outcomes(
     core_url: impl IntoUrl,
     client: reqwest::Client,
 ) -> anyhow::Result<Vec<OutcomeMarket>> {
     let meta = outcome_meta(core_url, client).await?;
+    Ok(outcome_markets(&meta))
+}
 
+/// Returns one [`OutcomeMarket`] per side of every outcome in `meta`.
+///
+/// Sides are indexed by position, not by name: template outcomes name their sides
+/// `template:Yes` and `template:No`, or after the participants.
+#[cfg(any(feature = "http", test))]
+fn outcome_markets(meta: &OutcomeMeta) -> Vec<OutcomeMarket> {
     let mut result = Vec::new();
     for o in &meta.outcomes {
         for (side_index, side) in o.side_specs.iter().enumerate() {
@@ -1958,7 +2124,7 @@ pub async fn outcomes(
         }
     }
 
-    Ok(result)
+    result
 }
 
 /// Raw encoding for an outcome side: `10 * outcome_id + side_index`.
@@ -1987,15 +2153,8 @@ pub fn parse_outcome_coin(coin: &str) -> Option<(u32, u32)> {
     Some((encoding / 10, encoding % 10))
 }
 
-/// Settlement record for a resolved outcome (`settledOutcome` info).
-#[derive(Debug, Clone)]
-pub struct SettledOutcome {
-    pub spec: OutcomeInfo,
-    pub settle_fraction: String,
-    pub details: String,
-}
-
 /// Fetch settlement for one outcome id (`null` when unsettled).
+#[cfg(feature = "http")]
 pub async fn settled_outcome(
     core_url: impl IntoUrl,
     client: reqwest::Client,
@@ -2003,7 +2162,7 @@ pub async fn settled_outcome(
 ) -> anyhow::Result<Option<SettledOutcome>> {
     let mut url = core_url.into_url()?;
     url.set_path("/info");
-    let mapped = info_gate::with_info_slot("settledOutcome", || {
+    info_gate::with_info_slot("settledOutcome", || {
         let url = url.clone();
         let client = client.clone();
         async move {
@@ -2022,32 +2181,15 @@ pub async fn settled_outcome(
             if body.trim().is_empty() || body.trim() == "null" {
                 return Ok(None);
             }
-            let raw: RawSettledOutcome =
-                serde_json::from_str(&body).context("settledOutcome JSON")?;
-            Ok(Some(raw))
+            serde_json::from_str(&body).context("settledOutcome JSON")
         }
     })
-    .await?
-    .map(|raw| SettledOutcome {
-        spec: OutcomeInfo {
-            outcome: raw.spec.outcome,
-            name: raw.spec.name,
-            description: raw.spec.description,
-            side_specs: raw
-                .spec
-                .side_specs
-                .into_iter()
-                .map(|s| OutcomeSideSpec { name: s.name })
-                .collect(),
-        },
-        settle_fraction: raw.settle_fraction,
-        details: raw.details,
-    });
-    Ok(mapped)
+    .await
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(feature = "http", test))]
 struct RawOutcomeMeta {
     #[serde(default)]
     outcomes: Vec<RawOutcomeInfo>,
@@ -2062,6 +2204,28 @@ struct RawOutcomeInfo {
     name: String,
     description: String,
     side_specs: Vec<RawOutcomeSideSpec>,
+    quote_token: Option<String>,
+    venue: Option<String>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    deployer_fee_scale: Option<Decimal>,
+}
+
+impl From<RawOutcomeInfo> for OutcomeInfo {
+    fn from(raw: RawOutcomeInfo) -> Self {
+        Self {
+            outcome: raw.outcome,
+            name: raw.name,
+            description: raw.description,
+            side_specs: raw
+                .side_specs
+                .into_iter()
+                .map(|s| OutcomeSideSpec { name: s.name })
+                .collect(),
+            quote_token: raw.quote_token,
+            venue: raw.venue,
+            deployer_fee_scale: raw.deployer_fee_scale,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2072,6 +2236,7 @@ struct RawOutcomeSideSpec {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(feature = "http", test))]
 struct RawOutcomeQuestion {
     question: u32,
     name: String,
@@ -2081,14 +2246,6 @@ struct RawOutcomeQuestion {
     named_outcomes: Vec<u32>,
     #[serde(default)]
     settled_named_outcomes: Vec<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawSettledOutcome {
-    spec: RawOutcomeInfo,
-    settle_fraction: String,
-    details: String,
 }
 
 /// Generates an EVM transfer address for cross-chain transfers.
@@ -2106,6 +2263,7 @@ fn generate_evm_transfer_address(index: usize) -> Address {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "http")]
 struct PerpTokens {
     universe: Vec<PerpUniverseItem>,
     collateral_token: usize,
@@ -2159,6 +2317,7 @@ fn parse_margin_tables(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "http")]
 struct PerpUniverseItem {
     name: String,
     max_leverage: u64,
@@ -2178,6 +2337,7 @@ struct PerpUniverseItem {
     delisted: bool,
 }
 
+#[cfg(feature = "http")]
 fn deserialize_growth_mode<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2207,6 +2367,7 @@ pub enum MarginMode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "http")]
 struct SpotTokens {
     universe: Vec<SpotUniverseItem>,
     tokens: Vec<Token>,
@@ -2214,6 +2375,7 @@ struct SpotTokens {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "http")]
 struct SpotUniverseItem {
     // base and quote
     tokens: [u32; 2],
@@ -2283,11 +2445,16 @@ struct EvmContract {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, thread};
+    use std::{sync::Arc, thread};
 
+    #[cfg(feature = "http")]
+    use std::collections::{HashMap, HashSet};
+
+    #[cfg(feature = "http")]
     use alloy::primitives::address;
 
     use super::*;
+    #[cfg(feature = "http")]
     use crate::hypercore;
 
     #[test]
@@ -2309,6 +2476,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_spot_markets() {
         let client = reqwest::Client::new();
@@ -2318,6 +2486,7 @@ mod tests {
         assert!(!markets.is_empty());
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_evm_send_addresses() {
         let expected_addresses = HashMap::from([
@@ -2361,6 +2530,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_clearinghouse_state() {
         let client = hypercore::mainnet();
@@ -2374,6 +2544,7 @@ mod tests {
         assert!(state.margin_summary.account_value >= rust_decimal::Decimal::ZERO);
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_user_balances() {
         let client = hypercore::mainnet();
@@ -2382,6 +2553,7 @@ mod tests {
         let _balances = client.user_balances(user).await.unwrap();
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_user_fees() {
         let client = hypercore::mainnet();
@@ -2394,6 +2566,7 @@ mod tests {
     /// as raw JSON. A shape change here is a deserialization failure, which the
     /// `info_requests_are_still_answered` audit cannot see: it parses everything as
     /// `serde_json::Value`.
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_undocumented_typed_responses() {
         let client = hypercore::mainnet();
@@ -2428,8 +2601,16 @@ mod tests {
                 .iter()
                 .any(|(_, venues)| venues.iter().any(|(_, predicted)| predicted.is_none()))
         );
+
+        // Outcome 9 is a named outcome of an early BTC price-bucket question, settled at 0.
+        let settled = client.settled_outcome(9).await.unwrap().unwrap();
+        assert_eq!(settled.spec.outcome, 9);
+        assert!(settled.question.is_some());
+        // An outcome that has not settled, or does not exist, comes back as null.
+        assert!(client.settled_outcome(999_999_999).await.unwrap().is_none());
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_all_mids() {
         let client = hypercore::mainnet();
@@ -2441,6 +2622,7 @@ mod tests {
         assert!(*mids.get("BTC").unwrap() > rust_decimal::Decimal::ZERO);
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_open_orders() {
         let client = hypercore::mainnet();
@@ -2449,6 +2631,7 @@ mod tests {
         let _orders = client.open_orders(user, None).await.unwrap();
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_perps() {
         let client = hypercore::mainnet();
@@ -2460,6 +2643,72 @@ mod tests {
         assert!(perps.iter().any(|m| m.name == "ETH"));
     }
 
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn test_http_perp_dex_details() {
+        for client in [hypercore::mainnet(), hypercore::testnet()] {
+            let details = client.perp_dex_details().await.unwrap();
+            let dexes = client.perp_dexes().await.unwrap();
+            assert!(!details.is_empty());
+
+            // HIP-3 asset IDs are derived from the index, so both methods must agree on it.
+            assert_eq!(details.len(), dexes.len());
+            for (detail, dex) in details.iter().zip(&dexes) {
+                assert_eq!(
+                    (detail.name.as_str(), detail.index),
+                    (dex.name(), dex.index())
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn test_http_user_star_state() {
+        let client = hypercore::testnet();
+
+        // A user no venue has approved gets an empty list.
+        let none = client.user_star_state(Address::ZERO).await.unwrap();
+        assert!(none.dex_to_state.is_empty());
+
+        // Traders on HIP-3* venues have non-empty states, which exercises the flags shape.
+        let star_dexes = client
+            .perp_dex_details()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|dex| {
+                dex.sub_deployers.iter().any(|grant| {
+                    matches!(
+                        grant.permission,
+                        hypercore::SubDeployerPermission::Hip3Star { .. }
+                    )
+                })
+            });
+        for dex in star_dexes {
+            for market in client
+                .perps_from(dex.dex())
+                .await
+                .unwrap()
+                .into_iter()
+                .take(2)
+            {
+                for trade in client
+                    .recent_trades(market.name)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .take(3)
+                {
+                    for user in trade.users {
+                        client.user_star_state(user).await.unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_spot() {
         let client = hypercore::mainnet();
@@ -2469,6 +2718,7 @@ mod tests {
         assert!(!spots.is_empty());
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_delisted_markets() {
         let exp = [
@@ -2592,6 +2842,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_outcome_meta_mainnet() {
         let client = hypercore::mainnet();
@@ -2600,6 +2851,7 @@ mod tests {
         let _ = meta.outcomes.len();
     }
 
+    #[cfg(feature = "http")]
     #[tokio::test]
     async fn test_http_outcome_meta_testnet() {
         let client = hypercore::testnet();
@@ -2614,6 +2866,19 @@ mod tests {
                 "outcome {} should have 2 sides",
                 o.outcome
             );
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn test_http_outcome_markets_are_distinct() {
+        for client in [hypercore::mainnet(), hypercore::testnet()] {
+            let markets = client.outcomes().await.unwrap();
+            assert!(!markets.is_empty());
+            // Every side of every outcome is its own asset. Template outcomes name their sides
+            // "template:Yes" and "template:No", which a match on "Yes" gave the same index.
+            let unique: HashSet<usize> = markets.iter().map(|m| m.market).collect();
+            assert_eq!(unique.len(), markets.len());
         }
     }
 
@@ -2654,6 +2919,9 @@ mod tests {
         assert_eq!(meta.outcomes[1].side_specs[1].name, "Usain Bolt");
         assert_eq!(meta.questions.len(), 1);
         assert_eq!(meta.questions[0].question, 1);
+        assert_eq!(meta.questions[0].name, "What will Hypurr eat?");
+        assert_eq!(meta.questions[0].description, "Food journal.");
+        assert!(meta.questions[0].settled_named_outcomes.is_empty());
         assert_eq!(meta.questions[0].fallback_outcome, Some(13));
         assert_eq!(meta.questions[0].named_outcomes, vec![10, 11, 12]);
     }
@@ -2686,6 +2954,9 @@ mod tests {
                 OutcomeSideSpec { name: "No".into() },
                 OutcomeSideSpec { name: "Yes".into() },
             ],
+            quote_token: None,
+            venue: None,
+            deployer_fee_scale: None,
         };
         let m0 = OutcomeMarket {
             info: o.clone(),
@@ -2699,5 +2970,172 @@ mod tests {
         };
         assert_eq!(m0.coin(), "#50");
         assert_eq!(m1.coin(), "#51");
+    }
+
+    #[test]
+    fn outcome_info_deserialize_venue_fields() {
+        // A deployer-listed outcome, and one of the daily "Recurring" markets, which have no
+        // venue or deployer fee scale, as mainnet sends them.
+        let json = r#"[
+            {
+                "outcome": 1472,
+                "name": "template fallback",
+                "description": "other",
+                "sideSpecs": [{"name": "Yes"}, {"name": "No"}],
+                "quoteToken": "USDC",
+                "venue": "out",
+                "deployerFeeScale": "1.0"
+            },
+            {
+                "outcome": 3,
+                "name": "Recurring",
+                "description": "class:priceBinary|underlying:BTC|expiry:20260506-0600|targetPrice:80930|period:1d",
+                "sideSpecs": [{"name": "Yes"}, {"name": "No"}],
+                "quoteToken": "USDH"
+            }
+        ]"#;
+        let outcomes: Vec<OutcomeInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(outcomes[0].quote_token.as_deref(), Some("USDC"));
+        assert_eq!(outcomes[0].venue.as_deref(), Some("out"));
+        assert_eq!(outcomes[0].deployer_fee_scale, Some(Decimal::ONE));
+        assert_eq!(outcomes[1].quote_token.as_deref(), Some("USDH"));
+        assert_eq!(outcomes[1].venue, None);
+        assert_eq!(outcomes[1].deployer_fee_scale, None);
+    }
+
+    #[test]
+    fn outcome_markets_index_sides_by_position() {
+        // Template outcomes do not name their first side "Yes". Matching on the name gave both
+        // sides of these outcomes the second side's asset index.
+        let json = r#"[
+            {
+                "outcome": 1472,
+                "name": "template fallback",
+                "description": "other",
+                "sideSpecs": [{"name": "Yes"}, {"name": "No"}]
+            },
+            {
+                "outcome": 8591,
+                "name": "template:binaryPrice",
+                "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:85734|time:20261005-0600",
+                "sideSpecs": [{"name": "template:Yes"}, {"name": "template:No"}]
+            },
+            {
+                "outcome": 6733,
+                "name": "template:sportsContestWinner",
+                "description": "shortNameA:Buccaneers|shortNameB:Cowboys",
+                "sideSpecs": [{"name": "template:{shortNameA}"}, {"name": "template:{shortNameB}"}]
+            }
+        ]"#;
+        let meta = OutcomeMeta {
+            outcomes: serde_json::from_str(json).unwrap(),
+            questions: vec![],
+        };
+
+        let markets: Vec<(String, usize, String)> = outcome_markets(&meta)
+            .iter()
+            .map(|m| (m.side.clone(), m.market, m.coin()))
+            .collect();
+        assert_eq!(
+            markets,
+            [
+                ("Yes", 100_014_720, "#14720"),
+                ("No", 100_014_721, "#14721"),
+                ("template:Yes", 100_085_910, "#85910"),
+                ("template:No", 100_085_911, "#85911"),
+                ("template:{shortNameA}", 100_067_330, "#67330"),
+                ("template:{shortNameB}", 100_067_331, "#67331"),
+            ]
+            .map(|(side, market, coin)| (side.to_string(), market, coin.to_string()))
+        );
+    }
+
+    #[test]
+    fn settled_outcome_deserialize() {
+        // A standalone outcome, a named outcome of a settled question, and a named outcome of a
+        // question that is still active, as mainnet and testnet send them.
+        let standalone: SettledOutcome = serde_json::from_str(
+            r#"{
+                "spec": {
+                    "outcome": 3,
+                    "name": "Recurring",
+                    "description": "class:priceBinary|underlying:BTC|expiry:20260506-0600|targetPrice:80930|period:1d",
+                    "sideSpecs": [{"name": "Yes"}, {"name": "No"}],
+                    "quoteToken": "USDH"
+                },
+                "settleFraction": "1.0",
+                "details": "price:81290.9"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(standalone.spec.outcome, 3);
+        assert_eq!(standalone.spec.quote_token.as_deref(), Some("USDH"));
+        assert_eq!(standalone.settle_fraction, Decimal::ONE);
+        assert_eq!(standalone.details, "price:81290.9");
+        assert!(standalone.question.is_none());
+
+        let named: SettledOutcome = serde_json::from_str(
+            r#"{
+                "spec": {
+                    "outcome": 9,
+                    "name": "Recurring Named Outcome",
+                    "description": "index:2",
+                    "sideSpecs": [{"name": "Yes"}, {"name": "No"}],
+                    "quoteToken": "USDH"
+                },
+                "settleFraction": "0.0",
+                "details": "price:79580.2",
+                "question": {
+                    "question": {"settled": 0},
+                    "name": "Recurring",
+                    "description": "class:priceBucket|underlying:BTC|expiry:20260508-0600|priceThresholds:79303,82540|period:1d"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(named.settle_fraction, Decimal::ZERO);
+        let question = named.question.unwrap();
+        assert_eq!(question.question, OutcomeQuestionState::Settled(0));
+        assert_eq!(question.name, "Recurring");
+
+        let active: SettledOutcome = serde_json::from_str(
+            r#"{
+                "spec": {
+                    "outcome": 12568,
+                    "name": "template:sportsContestParticipant",
+                    "description": "participant:Arsenal",
+                    "sideSpecs": [{"name": "Yes"}, {"name": "No"}],
+                    "quoteToken": "USDC",
+                    "venue": "mig",
+                    "deployerFeeScale": "1.0"
+                },
+                "settleFraction": "0.0",
+                "details": "template",
+                "question": {
+                    "question": {"active": 979},
+                    "name": "template:sportsContestResult",
+                    "description": "participantA:Arsenal|participantB:Chelsea"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(active.spec.venue.as_deref(), Some("mig"));
+        assert_eq!(
+            active.question.unwrap().question,
+            OutcomeQuestionState::Active(979)
+        );
+
+        // The exchange answers null for an outcome that has not settled.
+        let unsettled: Option<SettledOutcome> = serde_json::from_str("null").unwrap();
+        assert!(unsettled.is_none());
+    }
+
+    #[test]
+    fn outcome_question_state_keeps_unknown_shapes() {
+        let state: OutcomeQuestionState = serde_json::from_str(r#"{"paused": 5}"#).unwrap();
+        assert_eq!(
+            state,
+            OutcomeQuestionState::Other(serde_json::json!({"paused": 5}))
+        );
     }
 }

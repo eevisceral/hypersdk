@@ -11,12 +11,12 @@
 //! | Module | Description | Common Use Cases |
 //! |--------|-------------|------------------|
 //! | [`hypercore`] | L1 trading & data | Place orders, query markets, stream data |
-//! | [`hypercore::http`] | HTTP API client | Account queries, order placement |
-//! | [`hypercore::ws`] | WebSocket streaming | Real-time market data, order updates |
+//! | `hypercore::http` | HTTP API client | Account queries, order placement |
+//! | `hypercore::ws` | WebSocket streaming | Real-time market data, order updates |
 //! | [`hypercore::types`] | Core type definitions | Orders, trades, candles, subscriptions |
 //! | [`hypercore::signing`] | Signature utilities | Sign actions, recover addresses |
-//! | [`hyperevm::morpho`] | Morpho lending | Query APY, lending positions |
-//! | [`hyperevm::uniswap`] | Uniswap V3 | Pool prices, liquidity positions |
+//! | `hyperevm::morpho` | Morpho lending | Query APY, lending positions |
+//! | `hyperevm::uniswap` | Uniswap V3 | Pool prices, liquidity positions |
 //!
 //! ## Features
 //!
@@ -37,15 +37,23 @@
 //! Add to your `Cargo.toml`:
 //! ```toml
 //! [dependencies]
-//! hypersdk = "0.1"
+//! hypersdk = "0.3"
 //! rust_decimal = "1.39"
 //! tokio = { version = "1", features = ["full"] }
 //! anyhow = "1"
 //! ```
 //!
+//! Default features are `http` and `ws`. Types and signing are always available.
+//! Enable `hyperevm` for EVM providers and contracts, `morpho` for lending,
+//! or `uniswap` for Uniswap V3 and PRJX. Both protocol features enable `hyperevm`.
+//! Use `default-features = false` to select only the features you need.
+//!
 //! ### Your First Query
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "http")]
+//! # {
 //! use hypersdk::hypercore;
 //!
 //! #[tokio::main]
@@ -58,11 +66,16 @@
 //!     }
 //!     Ok(())
 //! }
+//! # }
+//! # }
 //! ```
 //!
 //! ### Placing an Order
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "http")]
+//! # {
 //! use hypersdk::hypercore::{self, types::*, PrivateKeySigner};
 //! use rust_decimal::dec;
 //!
@@ -90,11 +103,16 @@
 //! let result = client.place(&signer, order, nonce, None, None).await?;
 //! # Ok(())
 //! # }
+//! # }
+//! # }
 //! ```
 //!
 //! ### WebSocket Subscriptions
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(feature = "ws")]
+//! # {
 //! use futures::StreamExt;
 //! use hypersdk::Address;
 //! use hypersdk::hypercore::{self, types::*, ws::Event};
@@ -149,6 +167,8 @@
 //!     }
 //! }
 //! # Ok(())
+//! # }
+//! # }
 //! # }
 //! ```
 //!
@@ -206,10 +226,15 @@
 //! Use testnet for development and testing:
 //!
 //! ```no_run
+//! # fn main() {
+//! # #[cfg(all(feature = "http", feature = "ws"))]
+//! # {
 //! use hypersdk::hypercore;
 //!
 //! let client = hypercore::testnet();
 //! let mut ws = hypercore::testnet_ws();
+//! # }
+//! # }
 //! ```
 //!
 //! ## Examples
@@ -226,15 +251,18 @@
 //! ## Modules
 //!
 //! - [`hypercore`]: HyperCore L1 chain interactions (trading, transfers, WebSocket)
-//!   - [`hypercore::http`]: HTTP API client for queries and trading
-//!   - [`hypercore::ws`]: WebSocket client for real-time data
+//!   - `hypercore::http`: HTTP API client for queries and trading
+//!   - `hypercore::ws`: WebSocket client for real-time data
 //!   - [`hypercore::types`]: Core type definitions (orders, trades, market data)
-//! - [`hyperevm`]: HyperEVM contract interactions
-//!   - [`hyperevm::morpho`]: Morpho lending protocol integration
-//!   - [`hyperevm::uniswap`]: Uniswap V3 DEX integration
+//! - `hyperevm`: HyperEVM contract interactions
+//!   - `hyperevm::morpho`: Morpho lending protocol integration
+//!   - `hyperevm::uniswap`: Uniswap V3 DEX integration
 
 pub mod hypercore;
+#[cfg(feature = "hyperevm")]
 pub mod hyperevm;
+
+mod units;
 
 /// Re-exported Ethereum address type from Alloy.
 ///

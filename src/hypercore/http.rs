@@ -57,7 +57,8 @@ use url::Url;
 use super::{ApiError, AssetTarget, signing::*};
 use crate::hypercore::{
     ActionError, ApiAgent, Builder, CandleInterval, Chain, Cloid, Dex, GossipPriorityAuctionStatus,
-    Market, MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, Signature, SpotMarket, SpotToken,
+    Market, MultiSigConfig, OidOrCloid, OutcomeMeta, PerpMarket, SettledOutcome, Signature,
+    SpotMarket, SpotToken,
     api::{
         Action, ActionRequest, AddressEncoding, ApproveAgent, ApproveBuilderFee, Aqav2Role,
         AuthorizeAqav2Role, BorrowLendAction, CSignerAction, CValidatorAction,
@@ -66,22 +67,22 @@ use crate::hypercore::{
         OkResponse, Response, SendToEvmWithDataAction, SignersConfig, SpotUserAction,
         StakingLinkDisableTradingUserAction, SubAccountModify, SubAccountSpotTransfer,
         SubAccountTransfer, ToggleSpotDusting, TokenDelegateAction, TopUpIsolatedOnlyMargin,
-        TwapOrderParams, UpdateIsolatedMargin, UpdateLeverage, UsdClassTransferAction,
-        UserOutcomeAction, UserPortfolioMarginAction, ValidatorL1Stream, VaultDistribute,
-        VaultModify, VaultTransfer, Withdraw3Action,
+        TrailingStop, TwapOrderParams, UpdateIsolatedMargin, UpdateLeverage,
+        UsdClassTransferAction, UserOutcomeAction, UserPortfolioMarginAction, ValidatorL1Stream,
+        VaultDistribute, VaultModify, VaultTransfer, Withdraw3Action,
     },
-    deploy::{ActivateOutcomeDeployer, OutcomeDeployAction, PerpDeployAction, SpotDeployAction},
+    deploy::{ActivateOutcomeDeployer, OutcomeDeploy, PerpDeployAction, SpotDeployAction},
     mainnet_url, testnet_url,
     types::{
         AbstractionMode, ActiveAssetData, AgentSendAsset, BasicOrder, BatchCancel,
         BatchCancelCloid, BatchModify, BatchOrder, ClearinghouseState, Delegation,
         DelegatorSummary, DeployAuctionStatus, ExchangeStatus, Fill, FundingRate, InfoRequest,
         L2Book, LegalCheck, MarginTable, OrderGrouping, OrderRequest, OrderResponseStatus,
-        OrderTypePlacement, OrderUpdate, PerpDexLimits, PerpDexStatus, PreTransferCheck,
-        PredictedFundingVenue, ScheduleCancel, SendAsset, SendToken, SpotSend, SubAccount,
-        TimeInForce, TokenDetails, Trade, TwapSliceFill, UsdSend, UsdcRouting, UserBalance,
-        UserFees, UserFundingEntry, UserRateLimit, UserRole, UserSetAbstractionAction,
-        UserVaultEquity, VaultDetails,
+        OrderTypePlacement, OrderUpdate, PerpDexDetails, PerpDexLimits, PerpDexStatus,
+        PreTransferCheck, PredictedFundingVenue, ScheduleCancel, SendAsset, SendToken, SpotSend,
+        SubAccount, TimeInForce, TokenDetails, Trade, TwapSliceFill, UsdSend, UsdcRouting,
+        UserBalance, UserFees, UserFundingEntry, UserRateLimit, UserRole, UserSetAbstractionAction,
+        UserStarState, UserVaultEquity, VaultDetails,
     },
 };
 
@@ -213,6 +214,7 @@ impl Client {
     /// // Subscribe and process messages
     /// # }
     /// ```
+    #[cfg(feature = "ws")]
     pub fn websocket(&self) -> super::WebSocket {
         let mut url = self.base_url.clone();
         let _ = url.set_scheme("wss");
@@ -223,6 +225,7 @@ impl Client {
     /// Creates a WebSocket connection without TLS (uses `ws://` instead of `wss://`).
     ///
     /// Useful for testing or local development.
+    #[cfg(feature = "ws")]
     pub fn websocket_no_tls(&self) -> super::WebSocket {
         let mut url = self.base_url.clone();
         let _ = url.set_scheme("ws");
@@ -1781,12 +1784,14 @@ impl Client {
     }
 
     /// Updates isolated margin for a position.
+    ///
+    /// `ntli` is the margin delta in USD with 6 decimals: positive adds margin, negative removes it.
     pub async fn update_isolated_margin<S: SignerSync>(
         &self,
         signer: &S,
         asset: usize,
         is_buy: bool,
-        ntli: u64,
+        ntli: i64,
         nonce: u64,
         vault_address: Option<Address>,
         expires_after: Option<DateTime<Utc>>,
@@ -2277,6 +2282,42 @@ impl Client {
         self.send_info_request("perp_dex_status", &req).await
     }
 
+    /// Returns the configuration of every HIP-3 DEX: deployer, oracle updater, fee recipient,
+    /// sub-deployer permissions, OI caps, and funding settings.
+    ///
+    /// Same `perpDexs` request as [`Self::perp_dexes`], which keeps only names and indices.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use hypersdk::hypercore;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let client = hypercore::mainnet();
+    /// for dex in client.perp_dex_details().await? {
+    ///     println!("{} oracle signers: {:?}", dex.name, dex.sub_deployers_for("setOracle"));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn perp_dex_details(&self) -> Result<Vec<PerpDexDetails>> {
+        let dexes = self
+            .send_info_request("perp_dex_details", &InfoRequest::PerpDexs)
+            .await?;
+        Ok(PerpDexDetails::from_response(dexes))
+    }
+
+    /// Returns a user's approval state on every HIP-3\* venue that has approved them. Venues
+    /// that have since removed the approval are listed with no flags.
+    ///
+    /// HIP-3\* venues are testnet-only.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-3-deployer-actions#reading-state>
+    pub async fn user_star_state(&self, user: Address) -> Result<UserStarState> {
+        let req = InfoRequest::UserStarState { user };
+        self.send_info_request("user_star_state", &req).await
+    }
+
     /// Returns all DEXs' meta + asset contexts.
     pub async fn all_perp_metas(&self) -> Result<serde_json::Value> {
         let req = InfoRequest::AllPerpMetas;
@@ -2321,8 +2362,9 @@ impl Client {
         self.send_info_request("token_details", &req).await
     }
 
-    /// Returns settled outcome market result.
-    pub async fn settled_outcome(&self, outcome: u64) -> Result<serde_json::Value> {
+    /// Returns how a HIP-4 outcome settled, or `None` if it has not settled. The exchange
+    /// answers `null` both for an outcome that is still trading and for an unknown ID.
+    pub async fn settled_outcome(&self, outcome: u64) -> Result<Option<SettledOutcome>> {
         let req = InfoRequest::SettledOutcome { outcome };
         self.send_info_request("settled_outcome", &req).await
     }
@@ -2623,6 +2665,26 @@ impl Client {
         self.send(req).await
     }
 
+    /// Place a native trailing stop and return the ID of the order it places.
+    ///
+    /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#place-a-trailing-stop-order>
+    pub async fn trailing_stop<S: SignerSync>(
+        &self,
+        signer: &S,
+        trailing_stop: TrailingStop,
+        nonce: u64,
+        vault_address: Option<Address>,
+        expires_after: Option<DateTime<Utc>>,
+    ) -> Result<u64> {
+        let action = Action::TrailingStop(trailing_stop);
+        let req = action.sign_sync(signer, nonce, vault_address, expires_after, self.chain)?;
+        match self.send(req).await? {
+            Response::Ok(OkResponse::TrailingStop { oid }) => Ok(oid),
+            Response::Err(err) => Err(ApiError(err).into()),
+            other => Err(ApiError(format!("unexpected response: {other:?}")).into()),
+        }
+    }
+
     /// Withdraw to Arbitrum L1.
     pub async fn withdraw<S: SignerSync>(
         &self,
@@ -2793,7 +2855,7 @@ impl Client {
         self.send(req).await?.into_default()
     }
 
-    /// Send a HIP-4 outcome deployer action.
+    /// Send a HIP-4 outcome deployer action for a venue.
     ///
     /// Lists of tuples must already be sorted, since the signature covers their encoding.
     ///
@@ -2801,7 +2863,7 @@ impl Client {
     pub async fn outcome_deploy<S: SignerSync>(
         &self,
         signer: &S,
-        action: OutcomeDeployAction,
+        action: OutcomeDeploy,
         nonce: u64,
         vault_address: Option<Address>,
         expires_after: Option<DateTime<Utc>>,

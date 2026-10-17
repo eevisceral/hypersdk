@@ -25,10 +25,10 @@ cargo run --example send_order
 cargo run --example websocket-user-events -- --user 0xYourAddress
 
 # Morpho examples
-cargo run --example morpho_highest_apy
+cargo run --features morpho --example morpho_highest_apy
 
 # Uniswap examples
-cargo run --example uniswap_pools_created
+cargo run --features uniswap --example uniswap_pools_created
 ```
 
 ---
@@ -104,7 +104,7 @@ Morpho is a lending protocol on HyperEVM. These examples show how to query lendi
 **Use case:** Integrate these into lending aggregators or yield farming bots
 
 ```bash
-cargo run --example morpho_highest_apy
+cargo run --features morpho --example morpho_highest_apy
 ```
 
 ---
@@ -121,7 +121,7 @@ Uniswap V3 integration for querying pools and tracking liquidity positions.
 **Use case:** Market making bots, liquidity analytics, DEX aggregators
 
 ```bash
-cargo run --example uniswap_pools_created
+cargo run --features uniswap --example uniswap_pools_created
 ```
 
 ---

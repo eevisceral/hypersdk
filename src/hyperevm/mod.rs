@@ -48,10 +48,13 @@
 //! Convert between decimal amounts and wei using `to_wei(amount, decimals)` and `from_wei(wei, decimals)`.
 
 pub mod logs;
+#[cfg(feature = "morpho")]
 pub mod morpho;
+#[cfg(feature = "uniswap")]
 pub mod uniswap;
 
 // reimport
+pub use crate::units::{from_wei, to_wei};
 pub use alloy::providers::ProviderBuilder;
 use alloy::{
     network::{Ethereum, IntoWallet},
@@ -63,7 +66,6 @@ pub use alloy::{
     providers::Provider as ProviderTrait,
     sol,
 };
-use rust_decimal::Decimal;
 
 /// HyperEVM mainnet chain ID.
 pub const CHAIN_ID: u64 = 999;
@@ -193,45 +195,9 @@ where
     Ok(provider)
 }
 
-/// Converts a decimal amount to wei representation.
-///
-/// Wei is the smallest unit of Ethereum tokens (like satoshis for Bitcoin).
-///
-/// # Parameters
-///
-/// - `size`: The decimal amount to convert
-/// - `decimals`: Number of decimal places for the token (e.g., 18 for ETH, 6 for USDC)
-///
-/// # Example
-///
-/// Convert 1.5 ETH to wei (18 decimals): `to_wei(dec!(1.5), 18)`
-#[must_use]
-#[inline]
-pub fn to_wei(mut size: Decimal, decimals: u32) -> U256 {
-    size.rescale(decimals);
-    U256::from(size.mantissa())
-}
-
-/// Converts wei representation to a decimal amount.
-///
-/// # Parameters
-///
-/// - `wei`: The wei amount to convert
-/// - `decimals`: Number of decimal places for the token (e.g., 18 for ETH, 6 for USDC)
-///
-/// # Example
-///
-/// Convert wei back to decimal: `from_wei(wei, 18)`
-#[must_use]
-#[inline]
-pub fn from_wei(wei: U256, decimals: u32) -> Decimal {
-    Decimal::from_i128_with_scale(wei.to::<i128>(), decimals)
-}
-
 #[cfg(test)]
 mod tests {
     use alloy::{primitives::U256, providers::ProviderBuilder};
-    use rust_decimal::dec;
 
     use super::*;
     use crate::hyperevm::DEFAULT_RPC_URL;
@@ -245,36 +211,5 @@ mod tests {
         let balance = whype.totalSupply().call().await.unwrap();
         // let balance = utils::format_units(balance, 18).expect("ok");
         assert_eq!(balance, U256::from(21_000_000u128 * 100_000_000u128));
-    }
-
-    #[test]
-    fn test_from_wei() {
-        let test_values = [
-            (
-                U256::from(72305406316320073300i128),
-                18,
-                dec!(72.305406316320073300),
-            ),
-            (U256::from(98996405), 6, dec!(98.996405)),
-        ];
-        for (index, (got, decimals, expect)) in test_values.into_iter().enumerate() {
-            assert_eq!(from_wei(got, decimals), expect, "failed at {index}");
-        }
-    }
-
-    #[test]
-    fn test_to_wei() {
-        let test_values = [
-            (
-                dec!(72.305406316320073386),
-                18,
-                U256::from(72305406316320073386i128),
-            ),
-            (dec!(98.996405), 6, U256::from(98996405)),
-            (dec!(69), 6, U256::from(69000000)),
-        ];
-        for (index, (got, decimals, expect)) in test_values.into_iter().enumerate() {
-            assert_eq!(to_wei(got, decimals), expect, "failed at {index}");
-        }
     }
 }

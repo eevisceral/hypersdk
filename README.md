@@ -87,7 +87,16 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hypersdk = "0.2"
+hypersdk = "0.3"
+```
+
+Default features are `http` and `ws`. HyperCore types and signing are always available;
+use `default-features = false` for those alone. Enable `hyperevm` for EVM providers
+and contracts, `morpho` for lending, or `uniswap` for Uniswap V3 and PRJX.
+Both protocol features enable `hyperevm`.
+
+```toml
+hypersdk = { version = "0.3", features = ["morpho", "uniswap"] }
 ```
 
 ## Quick Start

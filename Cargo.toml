@@ -1,7 +1,7 @@
 ## Package metadata
 [package]
 name = "hypersdk"
-version = "0.2.16"
+version = "0.3.0"
 edition = "2024"
 authors = ["Dario <dario@infinitefieldtrading.com>"]
 license = "MPL-2.0"
@@ -30,163 +30,222 @@ exclude = [
 [[example]]
 name = "approve-agent"
 path = "examples/hypercore/approve_agent.rs"
+required-features = ["http"]
 
 [[example]]
 name = "multisig-approve-agent"
 path = "examples/hypercore/multisig_approve_agent.rs"
+required-features = ["http"]
 
 [[example]]
 name = "websocket-candles"
 path = "examples/hypercore/websocket-candles.rs"
+required-features = ["http", "ws"]
 
 [[example]]
 name = "list-hip3"
 path = "examples/hypercore/list-hip3.rs"
+required-features = ["http"]
+
+[[example]]
+name = "hip3-dex-details"
+path = "examples/hypercore/hip3-dex-details.rs"
+required-features = ["http"]
 
 [[example]]
 name = "multisig_order"
 path = "examples/hypercore/multisig_order.rs"
+required-features = ["http"]
 
 [[example]]
 name = "multisig_send_usd"
 path = "examples/hypercore/multisig_send_usd.rs"
+required-features = ["http"]
 
 [[example]]
 name = "multisig_send_asset"
 path = "examples/hypercore/multisig_send_asset.rs"
+required-features = ["http"]
 
 [[example]]
 name = "buy_and_transfer"
 path = "examples/hypercore/buy_and_transfer.rs"
+required-features = ["http"]
 
 [[example]]
 name = "list-markets"
 path = "examples/hypercore/list-markets.rs"
+required-features = ["http"]
 
 [[example]]
 name = "list-tokens"
 path = "examples/hypercore/list-tokens.rs"
+required-features = ["http"]
 
 [[example]]
 name = "send_order"
 path = "examples/hypercore/send_order.rs"
+required-features = ["http"]
 
 [[example]]
 name = "send_usd"
 path = "examples/hypercore/send_usd.rs"
+required-features = ["http"]
 
 [[example]]
 name = "transfer_from_evm"
 path = "examples/hypercore/transfer_from_evm.rs"
+required-features = ["http", "hyperevm"]
 
 [[example]]
 name = "transfer_to_evm"
 path = "examples/hypercore/transfer_to_evm.rs"
+required-features = ["http"]
 
 [[example]]
 name = "market_order"
 path = "examples/hypercore/market_order.rs"
+required-features = ["http"]
 
 [[example]]
 name = "transfer_to_perps"
 path = "examples/hypercore/transfer_to_perps.rs"
+required-features = ["http"]
 
 [[example]]
 name = "transfer_to_spot"
 path = "examples/hypercore/transfer_to_spot.rs"
+required-features = ["http"]
 
 [[example]]
 name = "error_handling"
 path = "examples/hypercore/error_handling.rs"
+required-features = ["http"]
 
 [[example]]
 name = "websocket"
 path = "examples/hypercore/websocket.rs"
+required-features = ["http", "ws"]
 
 [[example]]
 name = "websocket-user-events"
 path = "examples/hypercore/websocket-user-events.rs"
+required-features = ["http", "ws"]
 
 [[example]]
 name = "websocket-post"
 path = "examples/hypercore/websocket_post.rs"
+required-features = ["http", "ws"]
 
 [[example]]
 name = "vault_details"
 path = "examples/hypercore/vault_details.rs"
+required-features = ["http"]
 
 [[example]]
 name = "vault_transfer"
 path = "examples/hypercore/vault_transfer.rs"
+required-features = ["http"]
 
 [[example]]
 name = "user_vault_equities"
 path = "examples/hypercore/user_vault_equities.rs"
+required-features = ["http"]
 
 [[example]]
 name = "user_role"
 path = "examples/hypercore/user_role.rs"
+required-features = ["http"]
 
 [[example]]
 name = "max_builder_fee"
 path = "examples/hypercore/max_builder_fee.rs"
+required-features = ["http"]
 
 [[example]]
 name = "user_fees"
 path = "examples/hypercore/user_fees.rs"
+required-features = ["http"]
 
 [[example]]
 name = "user_balances"
 path = "examples/hypercore/user_balances.rs"
+required-features = ["http"]
 
 [[example]]
 name = "subaccounts"
 path = "examples/hypercore/subaccounts.rs"
+required-features = ["http"]
 
 [[example]]
 name = "priority-fee-bid"
 path = "examples/hypercore/priority-fee-bid.rs"
+required-features = ["http", "hyperevm"]
 
 [[example]]
 name = "morpho_borrow_apy"
 path = "examples/morpho/borrow_apy.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "morpho_create_market_events"
 path = "examples/morpho/create_market_events.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "morpho_vault_performance"
 path = "examples/morpho/vault_performance.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "morpho_highest_apy"
 path = "examples/morpho/highest_apy.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "morpho_supply_apy"
 path = "examples/morpho/supply_apy.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "morpho_vault_apy"
 path = "examples/morpho/vault_apy.rs"
+required-features = ["morpho"]
 
 [[example]]
 name = "uniswap_pools_created"
 path = "examples/uniswap/pools_created.rs"
+required-features = ["uniswap"]
 
 [[example]]
 name = "uniswap_prjx_flows"
 path = "examples/uniswap/prjx_flows.rs"
+required-features = ["uniswap"]
 
 ## Documentation (docs.rs) configuration
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+## Optional SDK modules
+[features]
+default = ["http", "ws"]
+http = ["dep:reqwest", "dep:tokio", "dep:url"]
+ws = ["dep:futures", "dep:tokio", "dep:tokio-util", "dep:url", "dep:yawc"]
+hyperevm = [
+  "alloy/contract",
+  "alloy/providers",
+  "alloy/reqwest",
+  "alloy/reqwest-rustls-tls",
+  "alloy/rpc",
+  "alloy/rpc-types",
+]
+morpho = ["hyperevm", "dep:num-traits"]
+uniswap = ["hyperevm"]
+
 ## Runtime dependencies
 [dependencies]
-alloy = { version = "2", default-features = false, features = ["contract", "eip712", "getrandom", "providers", "reqwest", "reqwest-rustls-tls", "rpc", "rpc-types", "signer-local", "signers", "sol-types"] }
+alloy = { version = "2", default-features = false, features = ["dyn-abi", "eip712", "getrandom", "serde", "signer-local", "signers", "sol-types", "std"] }
 anyhow = "1"
 base64 = "0.23"
 thiserror = "2"
@@ -194,24 +253,25 @@ const-hex = { version = "1.17", features = ["serde"] }
 derive_more = { version = "2", features = ["display", "is_variant"] }
 either = { version = "1", features = ["serde"] }
 flate2 = "1"
-futures = { version = "0.3", default-features = false, features = ["std"] }
+futures = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 log = "0.4"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", optional = true, features = ["json"] }
 rmp-serde = "1"
 rust_decimal = { version = "1.39", features = ["macros", "maths", "serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", default-features = false, features = ["std"] }
-tokio = { version = "1", default-features = false, features = ["test-util", "time", "sync"] }
-tokio-util = { version = "0.7", default-features = false }
-url = "2"
-yawc = { version = "0.3", features = ["simd"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", optional = true, default-features = false, features = ["rt"] }
+url = { version = "2", optional = true }
+yawc = { version = "0.3", optional = true, features = ["simd"] }
 hex-literal = "1"
 chrono = { version = "0.4", features = ["now"] }
-num-traits = "0.2"
+num-traits = { version = "0.2", optional = true }
 
 ## Development and test dependencies
 [dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["std"] }
 alloy = { version = "2", features = ["pubsub", "signer-keystore"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15.7"

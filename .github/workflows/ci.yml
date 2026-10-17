@@ -36,4 +36,23 @@ jobs:
         run: rustc -Vv && cargo -V
 
       - name: Run tests
-        run: cargo test --lib -- --nocapture
+        run: cargo test --lib --all-features -- --nocapture
+
+  features:
+    name: Features (${{ matrix.features || 'types and signing' }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "http", "ws", "http,ws", "hyperevm", "morpho", "uniswap", "morpho,uniswap"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check library dependencies
+        run: cargo check -p hypersdk --lib --no-default-features --features "${{ matrix.features }}"
+      - name: Check tests and examples
+        run: cargo check -p hypersdk --all-targets --no-default-features --features "${{ matrix.features }}"
+      - name: Check documentation examples
+        run: cargo test -p hypersdk --doc --no-default-features --features "${{ matrix.features }}"
+      - name: Test types and signing without clients
+        if: matrix.features == ''
+        run: cargo test -p hypersdk --lib --no-default-features
