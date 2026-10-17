@@ -483,12 +483,46 @@ pub enum OkResponse {
     Cancel {
         statuses: Vec<OrderResponseStatus>,
     },
+    /// Reply to a TWAP order. A rejected TWAP is still a `status: ok` reply, with the
+    /// reason in [`TwapOrderStatus::Error`].
+    TwapOrder {
+        status: TwapOrderStatus,
+    },
+    /// Reply to a TWAP cancel. A failed cancel is still a `status: ok` reply, with the
+    /// reason in [`TwapCancelStatus::Error`].
+    TwapCancel {
+        status: TwapCancelStatus,
+    },
     /// Address of the sub-account just created. `data` is the bare address.
     CreateSubAccount(Address),
     /// Address of the vault just created. `data` is the bare address.
     CreateVault(Address),
     // should be ok?
     Default,
+}
+
+/// Outcome of a TWAP order, from the `twapOrder` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TwapOrderStatus {
+    /// The TWAP is running.
+    Running {
+        /// ID to cancel it with.
+        #[serde(rename = "twapId")]
+        twap_id: u64,
+    },
+    /// The exchange rejected the TWAP.
+    Error(String),
+}
+
+/// Outcome of a TWAP cancel, from the `twapCancel` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TwapCancelStatus {
+    /// The TWAP was canceled.
+    Success,
+    /// The cancel failed, e.g. because the TWAP was already canceled or filled.
+    Error(String),
 }
 
 impl Response {
@@ -964,7 +998,7 @@ impl AbstractionMode {
     pub fn from_api_str(s: &str) -> Result<Self, String> {
         match s {
             "disabled" | "i" | "standard" | "Standard" => Ok(Self::Standard),
-            "unifiedAccount" | "u" | "unified" => Ok(Self::UnifiedAccount),
+            "unifiedAccount" | "u" | "unified" | "default" => Ok(Self::UnifiedAccount),
             "portfolioMargin" | "p" | "portfolio" => Ok(Self::PortfolioMargin),
             other => Err(format!("unknown abstraction mode: {other}")),
         }
@@ -1554,11 +1588,17 @@ pub struct CreateVault {
 #[serde(rename_all = "camelCase")]
 pub struct VaultModify {
     /// The vault to change.
+    #[serde(
+        serialize_with = "crate::hypercore::utils::serialize_address_as_hex",
+        deserialize_with = "crate::hypercore::utils::deserialize_address_from_hex"
+    )]
     pub vault_address: Address,
     /// Whether new deposits are accepted. `None` leaves it unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_deposits: Option<bool>,
     /// Whether a withdrawal always closes the depositor's share of open positions.
     /// `None` leaves it unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub always_close_on_withdraw: Option<bool>,
 }
 
@@ -1567,6 +1607,10 @@ pub struct VaultModify {
 #[serde(rename_all = "camelCase")]
 pub struct VaultDistribute {
     /// The vault distributing.
+    #[serde(
+        serialize_with = "crate::hypercore::utils::serialize_address_as_hex",
+        deserialize_with = "crate::hypercore::utils::deserialize_address_from_hex"
+    )]
     pub vault_address: Address,
     /// Amount in 1e-6 USDC units. `0` closes the vault.
     pub usd: u64,
@@ -1919,6 +1963,46 @@ mod tests {
         let text =
             r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#;
         let _data: Response = serde_json::from_str(text).unwrap();
+    }
+
+    /// The exchange answers a TWAP with its own `type`. Without these variants a TWAP the
+    /// exchange accepted failed to deserialize and looked like a rejected order.
+    #[test]
+    fn twap_replies_deserialize() {
+        let parse = |text: &str| serde_json::from_str::<Response>(text).unwrap();
+
+        assert!(matches!(
+            parse(
+                r#"{"status":"ok","response":{"type":"twapOrder","data":{"status":{"running":{"twapId":77738308}}}}}"#
+            ),
+            Response::Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Running { twap_id: 77738308 }
+            })
+        ));
+        assert!(matches!(
+            parse(
+                r#"{"status":"ok","response":{"type":"twapOrder","data":{"status":{"error":"Invalid TWAP duration: 1 min(s)"}}}}"#
+            ),
+            Response::Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Error(error)
+            }) if error == "Invalid TWAP duration: 1 min(s)"
+        ));
+        assert!(matches!(
+            parse(
+                r#"{"status":"ok","response":{"type":"twapCancel","data":{"status":"success"}}}"#
+            ),
+            Response::Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Success
+            })
+        ));
+        assert!(matches!(
+            parse(
+                r#"{"status":"ok","response":{"type":"twapCancel","data":{"status":{"error":"TWAP was never placed, already canceled, or filled."}}}}"#
+            ),
+            Response::Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Error(_)
+            })
+        ));
     }
 
     #[test]
@@ -2391,6 +2475,10 @@ mod tests {
             AbstractionMode::UnifiedAccount
         );
         assert_eq!(
+            AbstractionMode::from_api_str("default").unwrap(),
+            AbstractionMode::UnifiedAccount
+        );
+        assert_eq!(
             AbstractionMode::from_api_str("portfolioMargin").unwrap(),
             AbstractionMode::PortfolioMargin
         );
@@ -2441,6 +2529,21 @@ mod tests {
             serde_json::to_value(&batch).unwrap().get("a").is_none(),
             "a must be omitted when false"
         );
+    }
+
+    #[test]
+    fn vault_modify_msgpack_matches_the_exchange_order() {
+        let action = Action::VaultModify(VaultModify {
+            vault_address: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            allow_deposits: Some(true),
+            always_close_on_withdraw: None,
+        });
+        let bytes = rmp_serde::to_vec_named(&action).unwrap();
+        let got = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let expected = "83a474797065ab7661756c744d6f64696679ac7661756c7441646472657373d92a307830303030303030303030303030303030303030303030303030303030303030303030303030303031ad616c6c6f774465706f73697473c3";
+        assert_eq!(got, expected);
     }
 
     #[test]
